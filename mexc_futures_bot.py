@@ -34,16 +34,31 @@ LAST_SCAN_TIME = None  # Thời gian quét lần cuối
 
 
 # ================== UTIL ==================
-async def fetch_json(session, url, params=None):
-    try:
-        async with session.get(url, params=params, timeout=10) as r:
-            # Chỉ log lỗi, không log success để giảm spam
-            r.raise_for_status()
-            data = await r.json()
-            return data.get("data", data)
-    except Exception as e:
-        print(f"❌ Error calling {url}: {e}")
-        raise
+async def fetch_json(session, url, params=None, retry=3):
+    """Fetch JSON với retry logic cho 429 errors"""
+    import random
+    
+    for attempt in range(retry):
+        try:
+            async with session.get(url, params=params, timeout=10) as r:
+                if r.status == 429:
+                    # Rate limit - đợi exponential backoff
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    print(f"⚠️ Rate limit {url}, retry sau {wait:.1f}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                
+                r.raise_for_status()
+                data = await r.json()
+                return data.get("data", data)
+        except Exception as e:
+            if attempt == retry - 1:  # Lần thử cuối
+                print(f"❌ Error calling {url}: {e}")
+                raise
+            # Thử lại với delay
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+    
+    raise Exception(f"Failed after {retry} retries")
 
 
 async def get_kline(session, symbol, interval="Min5", limit=10):
@@ -140,8 +155,9 @@ async def calc_movers(session, interval, symbols):
             return None
     
     # CHIA NHỎ THÀNH BATCH để tránh 429 Too Many Requests
-    BATCH_SIZE = 60  # Quét 60 coins/lần (cân bằng giữa tốc độ và rate limit)
-    BATCH_DELAY = 0.5  # Đợi 0.5s giữa các batch
+    BATCH_SIZE = 50  # Quét 50 coins/lần
+    BATCH_DELAY_MIN = 0.6  # Random delay 0.6-1.0s giữa các batch
+    BATCH_DELAY_MAX = 1.0
     
     all_movers = []
     for i in range(0, len(symbols), BATCH_SIZE):
@@ -153,9 +169,11 @@ async def calc_movers(session, interval, symbols):
         movers = [r for r in results if r is not None and not isinstance(r, Exception)]
         all_movers.extend(movers)
         
-        # Đợi giữa các batch (trừ batch cuối)
+        # Random delay giữa các batch (trừ batch cuối)
         if i + BATCH_SIZE < len(symbols):
-            await asyncio.sleep(BATCH_DELAY)
+            import random
+            delay = random.uniform(BATCH_DELAY_MIN, BATCH_DELAY_MAX)
+            await asyncio.sleep(delay)
     
     return all_movers
 
