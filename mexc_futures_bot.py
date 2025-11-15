@@ -140,8 +140,8 @@ async def calc_movers(session, interval, symbols):
             return None
     
     # CHIA NHỎ THÀNH BATCH để tránh 429 Too Many Requests
-    BATCH_SIZE = 100  # Quét 100 coins/lần (tăng từ 50)
-    BATCH_DELAY = 0.3  # Đợi 0.3s giữa các batch (giảm từ 0.5s)
+    BATCH_SIZE = 60  # Quét 60 coins/lần (cân bằng giữa tốc độ và rate limit)
+    BATCH_DELAY = 0.5  # Đợi 0.5s giữa các batch
     
     all_movers = []
     for i in range(0, len(symbols), BATCH_SIZE):
