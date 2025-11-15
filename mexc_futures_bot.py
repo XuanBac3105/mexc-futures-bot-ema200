@@ -20,8 +20,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 FUTURES_BASE = "https://contract.mexc.co"
 
 # Ngưỡng để báo động (%)
-PUMP_THRESHOLD = 5.0    # Tăng >= 5% trong 5 phút
-DUMP_THRESHOLD = -5.0   # Giảm >= 5% trong 5 phút
+PUMP_THRESHOLD = 3.0    # Tăng >= 3% trong 5 phút
+DUMP_THRESHOLD = -3.0   # Giảm >= 3% trong 5 phút
 
 # Volume tối thiểu để tránh coin ít thanh khoản
 MIN_VOL_THRESHOLD = 100000
@@ -120,7 +120,7 @@ async def unsubscribe(update, context):
 
 
 async def calc_movers(session, interval, symbols):
-    """Tính % thay đổi giá cho danh sách symbols - SONG SONG"""
+    """Tính % thay đổi giá cho danh sách symbols - BATCH để tránh rate limit"""
     import asyncio
     
     async def get_single_mover(sym):
@@ -139,14 +139,25 @@ async def calc_movers(session, interval, symbols):
         except Exception as e:
             return None
     
-    # Quét TẤT CẢ coins SONG SONG (không đợi từng coin)
-    tasks = [get_single_mover(sym) for sym in symbols]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # CHIA NHỎ THÀNH BATCH để tránh 429 Too Many Requests
+    BATCH_SIZE = 50  # Quét 50 coins/lần
+    BATCH_DELAY = 0.5  # Đợi 0.5s giữa các batch
     
-    # Lọc bỏ None và exceptions
-    movers = [r for r in results if r is not None and not isinstance(r, Exception)]
+    all_movers = []
+    for i in range(0, len(symbols), BATCH_SIZE):
+        batch = symbols[i:i+BATCH_SIZE]
+        tasks = [get_single_mover(sym) for sym in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Lọc bỏ None và exceptions
+        movers = [r for r in results if r is not None and not isinstance(r, Exception)]
+        all_movers.extend(movers)
+        
+        # Đợi giữa các batch (trừ batch cuối)
+        if i + BATCH_SIZE < len(symbols):
+            await asyncio.sleep(BATCH_DELAY)
     
-    return movers
+    return all_movers
 
 
 async def top10(update, context):
@@ -250,114 +261,167 @@ async def losers5(update, context):
 
 
 async def timelist(update, context):
-    """Lệnh xem lịch coin sẽ list trong 1 tuần"""
-    await update.message.reply_text("⏳ Đang lấy lịch listing...")
+    """Lệnh xem lịch Futures sẽ list trong 1 tuần - Web Scraping"""
+    await update.message.reply_text("⏳ Đang lấy lịch Futures listing...")
     
     try:
-        # Gọi API MEXC để lấy thông tin coin mới sắp list
         async with aiohttp.ClientSession() as session:
-            # API lấy announcement/news về coin listing
-            url = "https://www.mexc.com/api/platform/spot/market/newcoin"
-            async with session.get(url, timeout=10) as r:
-                if r.status != 200:
-                    await update.message.reply_text("❌ Không thể lấy dữ liệu từ MEXC")
-                    return
-                
-                data = await r.json()
-                
-                if not data or not data.get("data"):
-                    await update.message.reply_text("📅 Chưa có coin nào sắp list trong tuần tới")
-                    return
-                
-                # Múi giờ Việt Nam
-                vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-                now = datetime.now(vn_tz)
-                one_week_later = now + timedelta(days=7)
-                
-                msg = "📅 *LỊCH COIN SẮP LIST (1 TUẦN)*\n\n"
-                count = 0
-                
-                for item in data.get("data", []):
-                    # Lấy thời gian listing (timestamp milliseconds)
-                    list_time = item.get("onlineTime")
-                    if not list_time:
-                        continue
+            # Scrape 2 trang đầu từ announcements
+            import re
+            
+            # Pattern: "niêm yết X (SYMBOL) ... Futures ... HH:MM DD/MM/YYYY"
+            pattern = r'niêm yết\s+([\w\s]+?)\s*\(([A-Z0-9]+)\)\s+(?:USDT-M\s+)?[Ff]utures.*?(\d{2}:\d{2}\s+\d{2}/\d{2}/\d{4})'
+            
+            all_clean_matches = []
+            
+            # Scrape trang 1 và trang 2
+            urls = [
+                "https://www.mexc.co/vi-VN/announcements/new-listings",
+                "https://www.mexc.co/vi-VN/announcements/new-listings/19"
+            ]
+            
+            for url in urls:
+                try:
+                    async with session.get(url, timeout=15) as r:
+                        if r.status != 200:
+                            continue
+                        
+                        html = await r.text()
+                        matches = re.findall(pattern, html, re.DOTALL)
+                        
+                        # Làm sạch - loại text dài
+                        for full_name, symbol, time_str in matches:
+                            full_name = full_name.strip()
+                            if len(full_name) < 50 and '\n' not in full_name:
+                                # Tránh duplicate
+                                if (full_name, symbol, time_str) not in all_clean_matches:
+                                    all_clean_matches.append((full_name, symbol, time_str))
+                except:
+                    continue
+            
+            if not all_clean_matches:
+                raise Exception("Không tìm thấy Futures listing")
+            
+            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+            now = datetime.now(vn_tz)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            one_week_later = now + timedelta(days=7)
+            
+            msg = "📅 *LỊCH FUTURES SẮP LIST (1 TUẦN)*\n\n"
+            count = 0
+            
+            for full_name, symbol, time_str in all_clean_matches:
+                # Parse time: "21:10 14/11/2025"
+                try:
+                    dt = datetime.strptime(time_str, "%H:%M %d/%m/%Y")
+                    dt = vn_tz.localize(dt)
                     
-                    # Convert timestamp to datetime
-                    dt = datetime.fromtimestamp(list_time / 1000, tz=vn_tz)
-                    
-                    # Chỉ hiển thị coin list trong 1 tuần tới
-                    if now <= dt <= one_week_later:
-                        coin_name = item.get("vcoinName", "Unknown")
+                    # Hiển thị coin: thời gian >= hôm nay 00:00 VÀ <= 7 ngày tới
+                    if today_start <= dt <= one_week_later:
                         weekday = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"][dt.weekday()]
                         date_str = dt.strftime(f"{weekday}, %d/%m/%Y lúc %H:%M")
                         
-                        msg += f"🆕 `{coin_name}`\n"
+                        msg += f"🚀 `{symbol}` ({full_name})\n"
                         msg += f"   ⏰ {date_str}\n\n"
                         count += 1
-                
-                if count == 0:
-                    await update.message.reply_text("📅 Chưa có coin nào sắp list trong tuần tới")
-                else:
-                    await update.message.reply_text(msg, parse_mode="Markdown")
+                except:
+                    continue
+            
+            if count == 0:
+                await update.message.reply_text("📅 Chưa có Futures nào sắp list trong tuần tới")
+            else:
+                await update.message.reply_text(msg, parse_mode="Markdown")
     
     except Exception as e:
-        print(f"❌ Lỗi lấy lịch listing: {e}")
-        await update.message.reply_text("❌ Lỗi khi lấy dữ liệu. Vui lòng thử lại sau.")
+        print(f"❌ Lỗi scrape Futures listing: {e}")
+        await update.message.reply_text(
+            "❌ Không thể lấy dữ liệu từ MEXC\n\n"
+            "Vui lòng xem trực tiếp tại:\n"
+            "🔗 https://www.mexc.co/vi-VN/announcements/new-listings",
+            parse_mode="Markdown"
+        )
 
 
 async def coinlist(update, context):
-    """Lệnh xem các coin đã list trong 1 tuần"""
-    await update.message.reply_text("⏳ Đang lấy danh sách coin mới...")
+    """Lệnh xem các Futures đã list trong 1 tuần - Web Scraping"""
+    await update.message.reply_text("⏳ Đang lấy danh sách Futures mới...")
     
     try:
         async with aiohttp.ClientSession() as session:
-            # API lấy announcement/news về coin listing
-            url = "https://www.mexc.com/api/platform/spot/market/newcoin"
-            async with session.get(url, timeout=10) as r:
-                if r.status != 200:
-                    await update.message.reply_text("❌ Không thể lấy dữ liệu từ MEXC")
-                    return
-                
-                data = await r.json()
-                
-                if not data or not data.get("data"):
-                    await update.message.reply_text("📋 Không có coin nào list trong tuần qua")
-                    return
-                
-                # Múi giờ Việt Nam
-                vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-                now = datetime.now(vn_tz)
-                one_week_ago = now - timedelta(days=7)
-                
-                msg = "📋 *COIN ĐÃ LIST (1 TUẦN QUA)*\n\n"
-                count = 0
-                
-                for item in data.get("data", []):
-                    list_time = item.get("onlineTime")
-                    if not list_time:
-                        continue
+            # Scrape 2 trang đầu từ announcements
+            import re
+            
+            # Pattern: "niêm yết X (SYMBOL) ... Futures ... HH:MM DD/MM/YYYY"
+            pattern = r'niêm yết\s+([\w\s]+?)\s*\(([A-Z0-9]+)\)\s+(?:USDT-M\s+)?[Ff]utures.*?(\d{2}:\d{2}\s+\d{2}/\d{2}/\d{4})'
+            
+            all_clean_matches = []
+            
+            # Scrape trang 1 và trang 2
+            urls = [
+                "https://www.mexc.co/vi-VN/announcements/new-listings",
+                "https://www.mexc.co/vi-VN/announcements/new-listings/19"
+            ]
+            
+            for url in urls:
+                try:
+                    async with session.get(url, timeout=15) as r:
+                        if r.status != 200:
+                            continue
+                        
+                        html = await r.text()
+                        matches = re.findall(pattern, html, re.DOTALL)
+                        
+                        # Làm sạch - loại text dài
+                        for full_name, symbol, time_str in matches:
+                            full_name = full_name.strip()
+                            if len(full_name) < 50 and '\n' not in full_name:
+                                # Tránh duplicate
+                                if (full_name, symbol, time_str) not in all_clean_matches:
+                                    all_clean_matches.append((full_name, symbol, time_str))
+                except:
+                    continue
+            
+            if not all_clean_matches:
+                raise Exception("Không tìm thấy Futures listing")
+            
+            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+            now = datetime.now(vn_tz)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            one_week_ago = now - timedelta(days=7)
+            
+            msg = "📋 *FUTURES ĐÃ LIST (1 TUẦN QUA)*\n\n"
+            count = 0
+            
+            for full_name, symbol, time_str in all_clean_matches:
+                # Parse time: "21:10 14/11/2025"
+                try:
+                    dt = datetime.strptime(time_str, "%H:%M %d/%m/%Y")
+                    dt = vn_tz.localize(dt)
                     
-                    dt = datetime.fromtimestamp(list_time / 1000, tz=vn_tz)
-                    
-                    # Chỉ hiển thị coin list trong 1 tuần qua
-                    if one_week_ago <= dt <= now:
-                        coin_name = item.get("vcoinName", "Unknown")
+                    # Hiển thị coin: thời gian < hôm nay 00:00 VÀ >= 7 ngày trước
+                    if one_week_ago <= dt < today_start:
                         weekday = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"][dt.weekday()]
                         date_str = dt.strftime(f"{weekday}, %d/%m/%Y lúc %H:%M")
                         
-                        msg += f"✅ `{coin_name}`\n"
+                        msg += f"✅ `{symbol}` ({full_name})\n"
                         msg += f"   ⏰ {date_str}\n\n"
                         count += 1
-                
-                if count == 0:
-                    await update.message.reply_text("📋 Không có coin nào list trong tuần qua")
-                else:
-                    await update.message.reply_text(msg, parse_mode="Markdown")
+                except:
+                    continue
+            
+            if count == 0:
+                await update.message.reply_text("📋 Không có Futures nào list trong tuần qua")
+            else:
+                await update.message.reply_text(msg, parse_mode="Markdown")
     
     except Exception as e:
-        print(f"❌ Lỗi lấy danh sách coin: {e}")
-        await update.message.reply_text("❌ Lỗi khi lấy dữ liệu. Vui lòng thử lại sau.")
+        print(f"❌ Lỗi scrape Futures listing: {e}")
+        await update.message.reply_text(
+            "❌ Không thể lấy dữ liệu từ MEXC\n\n"
+            "Vui lòng xem trực tiếp tại:\n"
+            "🔗 https://www.mexc.co/vi-VN/announcements/new-listings",
+            parse_mode="Markdown"
+        )
 
 
 # ================== JOBS ==================
