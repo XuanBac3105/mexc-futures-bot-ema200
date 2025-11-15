@@ -8,6 +8,8 @@ from telegram.ext import (
     ContextTypes,
 )
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
+import pytz
 
 # Load biến môi trường từ file .env
 load_dotenv()
@@ -25,7 +27,7 @@ DUMP_THRESHOLD = -5.0   # Giảm >= 5% trong 5 phút
 MIN_VOL_THRESHOLD = 100000
 
 SUBSCRIBERS = set()
-KNOWN_NEW = set()
+KNOWN_SYMBOLS = set()  # Danh sách coin đã biết
 ALL_SYMBOLS = []  # Cache danh sách coin
 
 
@@ -97,7 +99,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Các lệnh:\n"
         "/subscribe – bật báo động\n"
         "/unsubscribe – tắt báo động\n"
-        "/top10 – xem top 10 gainers/losers hiện tại"
+        "/top10 – xem top 10 gainers + losers\n"
+        "/gainers5 – top 10 coin tăng mạnh nhất 5 phút\n"
+        "/losers5 – top 10 coin giảm mạnh nhất 5 phút\n"
+        "/timelist – lịch coin sắp list trong 1 tuần\n"
+        "/coinlist – coin đã list trong 1 tuần qua"
     )
 
 
@@ -163,6 +169,165 @@ async def top10(update, context):
     await update.message.reply_text(msg_g + msg_l, parse_mode="Markdown")
 
 
+async def gainers5(update, context):
+    """Lệnh xem top 10 gainers"""
+    await update.message.reply_text("⏳ Đang quét...")
+    
+    async with aiohttp.ClientSession() as session:
+        symbols = await get_all_symbols(session)
+        movers = await calc_movers(session, "Min5", symbols)
+    
+    if not movers:
+        await update.message.reply_text("❌ Không lấy được dữ liệu")
+        return
+    
+    # Lọc coin có volume đủ lớn
+    movers = [(s, c, o, n, v) for s, c, o, n, v in movers if v >= MIN_VOL_THRESHOLD]
+    top_g = sorted(movers, key=lambda x: x[1], reverse=True)[:10]
+    
+    msg = "🚀 *TOP 10 GAINERS (5 phút)*\n\n"
+    for i, (sym, chg, old, new, vol) in enumerate(top_g, 1):
+        coin = sym.replace("_USDT", "")
+        msg += f"{i}. `{coin}` {chg:+.2f}% ({old:.6g} → {new:.6g})\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def losers5(update, context):
+    """Lệnh xem top 10 losers"""
+    await update.message.reply_text("⏳ Đang quét...")
+    
+    async with aiohttp.ClientSession() as session:
+        symbols = await get_all_symbols(session)
+        movers = await calc_movers(session, "Min5", symbols)
+    
+    if not movers:
+        await update.message.reply_text("❌ Không lấy được dữ liệu")
+        return
+    
+    # Lọc coin có volume đủ lớn
+    movers = [(s, c, o, n, v) for s, c, o, n, v in movers if v >= MIN_VOL_THRESHOLD]
+    top_l = sorted(movers, key=lambda x: x[1])[:10]
+    
+    msg = "💥 *TOP 10 LOSERS (5 phút)*\n\n"
+    for i, (sym, chg, old, new, vol) in enumerate(top_l, 1):
+        coin = sym.replace("_USDT", "")
+        msg += f"{i}. `{coin}` {chg:+.2f}% ({old:.6g} → {new:.6g})\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def timelist(update, context):
+    """Lệnh xem lịch coin sẽ list trong 1 tuần"""
+    await update.message.reply_text("⏳ Đang lấy lịch listing...")
+    
+    try:
+        # Gọi API MEXC để lấy thông tin coin mới sắp list
+        async with aiohttp.ClientSession() as session:
+            # API lấy announcement/news về coin listing
+            url = "https://www.mexc.com/api/platform/spot/market/newcoin"
+            async with session.get(url, timeout=10) as r:
+                if r.status != 200:
+                    await update.message.reply_text("❌ Không thể lấy dữ liệu từ MEXC")
+                    return
+                
+                data = await r.json()
+                
+                if not data or not data.get("data"):
+                    await update.message.reply_text("📅 Chưa có coin nào sắp list trong tuần tới")
+                    return
+                
+                # Múi giờ Việt Nam
+                vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+                now = datetime.now(vn_tz)
+                one_week_later = now + timedelta(days=7)
+                
+                msg = "📅 *LỊCH COIN SẮP LIST (1 TUẦN)*\n\n"
+                count = 0
+                
+                for item in data.get("data", []):
+                    # Lấy thời gian listing (timestamp milliseconds)
+                    list_time = item.get("onlineTime")
+                    if not list_time:
+                        continue
+                    
+                    # Convert timestamp to datetime
+                    dt = datetime.fromtimestamp(list_time / 1000, tz=vn_tz)
+                    
+                    # Chỉ hiển thị coin list trong 1 tuần tới
+                    if now <= dt <= one_week_later:
+                        coin_name = item.get("vcoinName", "Unknown")
+                        weekday = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"][dt.weekday()]
+                        date_str = dt.strftime(f"{weekday}, %d/%m/%Y lúc %H:%M")
+                        
+                        msg += f"🆕 `{coin_name}`\n"
+                        msg += f"   ⏰ {date_str}\n\n"
+                        count += 1
+                
+                if count == 0:
+                    await update.message.reply_text("📅 Chưa có coin nào sắp list trong tuần tới")
+                else:
+                    await update.message.reply_text(msg, parse_mode="Markdown")
+    
+    except Exception as e:
+        print(f"❌ Lỗi lấy lịch listing: {e}")
+        await update.message.reply_text("❌ Lỗi khi lấy dữ liệu. Vui lòng thử lại sau.")
+
+
+async def coinlist(update, context):
+    """Lệnh xem các coin đã list trong 1 tuần"""
+    await update.message.reply_text("⏳ Đang lấy danh sách coin mới...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # API lấy announcement/news về coin listing
+            url = "https://www.mexc.com/api/platform/spot/market/newcoin"
+            async with session.get(url, timeout=10) as r:
+                if r.status != 200:
+                    await update.message.reply_text("❌ Không thể lấy dữ liệu từ MEXC")
+                    return
+                
+                data = await r.json()
+                
+                if not data or not data.get("data"):
+                    await update.message.reply_text("📋 Không có coin nào list trong tuần qua")
+                    return
+                
+                # Múi giờ Việt Nam
+                vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+                now = datetime.now(vn_tz)
+                one_week_ago = now - timedelta(days=7)
+                
+                msg = "📋 *COIN ĐÃ LIST (1 TUẦN QUA)*\n\n"
+                count = 0
+                
+                for item in data.get("data", []):
+                    list_time = item.get("onlineTime")
+                    if not list_time:
+                        continue
+                    
+                    dt = datetime.fromtimestamp(list_time / 1000, tz=vn_tz)
+                    
+                    # Chỉ hiển thị coin list trong 1 tuần qua
+                    if one_week_ago <= dt <= now:
+                        coin_name = item.get("vcoinName", "Unknown")
+                        weekday = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"][dt.weekday()]
+                        date_str = dt.strftime(f"{weekday}, %d/%m/%Y lúc %H:%M")
+                        
+                        msg += f"✅ `{coin_name}`\n"
+                        msg += f"   ⏰ {date_str}\n\n"
+                        count += 1
+                
+                if count == 0:
+                    await update.message.reply_text("📋 Không có coin nào list trong tuần qua")
+                else:
+                    await update.message.reply_text(msg, parse_mode="Markdown")
+    
+    except Exception as e:
+        print(f"❌ Lỗi lấy danh sách coin: {e}")
+        await update.message.reply_text("❌ Lỗi khi lấy dữ liệu. Vui lòng thử lại sau.")
+
+
 # ================== JOBS ==================
 async def job_scan_pumps_dumps(context):
     """Job chính: Quét TẤT CẢ coin và báo khi có pump/dump"""
@@ -217,42 +382,75 @@ async def job_scan_pumps_dumps(context):
 
 
 async def job_new_listing(context):
-    """Job phát hiện coin mới list"""
+    """Job phát hiện coin mới list bằng cách so sánh danh sách"""
     if not SUBSCRIBERS:
         return
 
     async with aiohttp.ClientSession() as session:
         try:
-            contracts = await get_all_contracts(session)
+            symbols = await get_all_symbols(session)
         except:
             return
-
-    alerts = []
-    for c in contracts:
-        sym = c["symbol"]
-        if sym not in KNOWN_NEW and c.get("isNew"):
-            KNOWN_NEW.add(sym)
+    
+    global KNOWN_SYMBOLS
+    
+    # Lần đầu chạy: lưu danh sách hiện tại
+    if not KNOWN_SYMBOLS:
+        KNOWN_SYMBOLS = set(symbols)
+        print(f"✅ Đã lưu {len(KNOWN_SYMBOLS)} coin ban đầu")
+        return
+    
+    # So sánh với danh sách cũ
+    new_coins = set(symbols) - KNOWN_SYMBOLS
+    
+    if new_coins:
+        alerts = []
+        for sym in new_coins:
+            KNOWN_SYMBOLS.add(sym)
             coin = sym.replace("_USDT", "")
-            alerts.append(f"🆕 *Coin mới list:* `{coin}`")
-            print(f"🆕 NEW: {sym}")
-
-    if alerts:
+            alerts.append(f"🆕 *COIN MỚI LIST:* `{coin}`")
+            print(f"🆕 NEW LISTING: {sym}")
+        
+        # Gửi thông báo
         text = "\n".join(alerts)
         for chat in SUBSCRIBERS:
             try:
                 await context.bot.send_message(chat, text, parse_mode="Markdown")
-            except:
-                pass
+            except Exception as e:
+                print(f"❌ Lỗi gửi thông báo coin mới: {e}")
 
 
 # ================== MAIN ==================
+async def post_init(app):
+    """Set bot commands menu"""
+    from telegram import BotCommand
+    
+    commands = [
+        BotCommand("start", "Khởi động bot và xem hướng dẫn"),
+        BotCommand("subscribe", "Bật thông báo pump/dump tự động"),
+        BotCommand("unsubscribe", "Tắt thông báo tự động"),
+        BotCommand("top10", "Top 10 coin tăng/giảm mạnh nhất"),
+        BotCommand("gainers5", "Top 10 coin tăng mạnh nhất 5 phút"),
+        BotCommand("losers5", "Top 10 coin giảm mạnh nhất 5 phút"),
+        BotCommand("timelist", "Lịch coin sắp list trong 1 tuần"),
+        BotCommand("coinlist", "Coin đã list trong 1 tuần qua"),
+    ]
+    
+    await app.bot.set_my_commands(commands)
+    print("✅ Đã thiết lập menu lệnh bot")
+
+
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("top10", top10))
+    app.add_handler(CommandHandler("gainers5", gainers5))
+    app.add_handler(CommandHandler("losers5", losers5))
+    app.add_handler(CommandHandler("timelist", timelist))
+    app.add_handler(CommandHandler("coinlist", coinlist))
 
     jq = app.job_queue
     # Quét pump/dump mỗi 30 giây (nhanh hơn)
