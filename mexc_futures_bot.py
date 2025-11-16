@@ -593,8 +593,24 @@ def main():
 
     jq = app.job_queue
     
-    # L\u1ea5y danh s\u00e1ch symbols v\u00e0 kh\u1edfi \u0111\u1ed9ng WebSocket
-    async def init_websocket(context):\n        global ALL_SYMBOLS\n        async with aiohttp.ClientSession() as session:\n            ALL_SYMBOLS = await get_all_symbols(session)\n            print(f\"\u2705 T\u00ecm th\u1ea5y {len(ALL_SYMBOLS)} coin\")\n        \n        # Kh\u1edfi \u0111\u1ed9ng WebSocket stream\n        asyncio.create_task(websocket_stream(context))\n    \n    # Ch\u1ea1y init ngay khi kh\u1edfi \u0111\u1ed9ng\n    jq.run_once(init_websocket, 5)\n    \n    # Reset base prices m\u1ed7i 1 ph\u00fat\n    jq.run_repeating(reset_base_prices, 60, first=65)\n    \n    # Ki\u1ec3m tra coin m\u1edbi m\u1ed7i 5 ph\u00fat\n    jq.run_repeating(job_new_listing, 300, first=30)
+    # Lấy danh sách symbols và khởi động WebSocket
+    async def init_websocket(context):
+        global ALL_SYMBOLS
+        async with aiohttp.ClientSession() as session:
+            ALL_SYMBOLS = await get_all_symbols(session)
+            print(f"✅ Tìm thấy {len(ALL_SYMBOLS)} coin")
+        
+        # Khởi động WebSocket stream
+        asyncio.create_task(websocket_stream(context))
+    
+    # Chạy init ngay khi khởi động
+    jq.run_once(init_websocket, 5)
+    
+    # Reset base prices mỗi 1 phút
+    jq.run_repeating(reset_base_prices, 60, first=65)
+    
+    # Kiểm tra coin mới mỗi 5 phút
+    jq.run_repeating(job_new_listing, 300, first=30)
 
     print("🔥 Bot quét MEXC Futures với WebSocket đang chạy...")
     print(f"📊 Ngưỡng pump: >= {PUMP_THRESHOLD}%")
