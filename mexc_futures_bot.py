@@ -1,5 +1,8 @@
 import os
 import aiohttp
+import asyncio
+import json
+import websockets
 from statistics import mean
 from telegram import Update
 from telegram.ext import (
@@ -10,6 +13,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import pytz
+from collections import defaultdict
 
 # Load biến môi trường từ file .env
 load_dotenv()
@@ -18,6 +22,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 FUTURES_BASE = "https://contract.mexc.co"
+WEBSOCKET_URL = "wss://contract.mexc.com/ws"  # WebSocket endpoint
 
 # Ngưỡng để báo động (%)
 PUMP_THRESHOLD = 2.0    # Tăng >= 2% trong 1 phút
@@ -29,6 +34,11 @@ MIN_VOL_THRESHOLD = 100000
 SUBSCRIBERS = set()
 KNOWN_SYMBOLS = set()  # Danh sách coin đã biết
 ALL_SYMBOLS = []  # Cache danh sách coin
+
+# WebSocket price tracking
+LAST_PRICES = {}  # {symbol: {"price": float, "time": datetime}}
+BASE_PRICES = {}  # {symbol: base_price} - giá base để so sánh
+ALERTED_SYMBOLS = {}  # {symbol: timestamp} - tránh spam alert
 
 
 # ================== UTIL ==================
@@ -121,10 +131,11 @@ def fmt_alert(symbol, old_price, new_price, change_pct):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
     await update.message.reply_text(
-        "🤖 Bot Quét MEXC Futures - Báo Động Realtime!\n\n"
-        "✅ Quét 722 coin Futures LIÊN TỤC\n"
-        "✅ Báo NGAY khi biến động ≥±2%\n"
-        "✅ So sánh giá REALTIME vs candle M1\n\n"
+        "🤖 Bot Quét MEXC Futures - WebSocket Realtime!\n\n"
+        "✅ WebSocket stream cho 722 coins\n"
+        "✅ Nhận giá REALTIME từ server\n"
+        "✅ Báo NGAY LẬP TỨC khi ≥±2%\n"
+        "✅ Không miss bất kỳ pump/dump nào\n\n"
         "Các lệnh:\n"
         "/subscribe – bật báo động\n"
         "/unsubscribe – tắt báo động\n"
@@ -141,6 +152,125 @@ async def subscribe(update, context):
 async def unsubscribe(update, context):
     SUBSCRIBERS.discard(update.effective_chat.id)
     await update.message.reply_text("Đã tắt báo!")
+
+
+async def websocket_stream(context):
+    """WebSocket stream để nhận giá realtime từ MEXC"""
+    while True:
+        try:
+            async with websockets.connect(WEBSOCKET_URL) as ws:
+                # Subscribe tất cả ticker streams
+                for symbol in ALL_SYMBOLS:
+                    sub_msg = {
+                        "method": "sub.ticker",
+                        "param": {"symbol": symbol}
+                    }
+                    await ws.send(json.dumps(sub_msg))
+                    await asyncio.sleep(0.01)  # Throttle subscriptions
+                
+                print(f"✅ Đã subscribe {len(ALL_SYMBOLS)} coin qua WebSocket")
+                
+                # Lắng nghe messages
+                async for message in ws:
+                    try:
+                        data = json.loads(message)
+                        
+                        # Bỏ qua ping/pong
+                        if "ping" in data:
+                            await ws.send(json.dumps({"pong": data["ping"]}))
+                            continue
+                        
+                        # Xử lý ticker data
+                        if "data" in data and "symbol" in data["data"]:
+                            await process_ticker(data["data"], context)
+                            
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        print(f"❌ Error processing message: {e}")
+                        continue
+                        
+        except Exception as e:
+            print(f"❌ WebSocket error: {e}")
+            print("🔄 Reconnecting in 5s...")
+            await asyncio.sleep(5)
+
+
+async def process_ticker(ticker_data, context):
+    """Xử lý ticker data từ WebSocket và phát hiện pump/dump"""
+    symbol = ticker_data.get("symbol")
+    if not symbol:
+        return
+    
+    try:
+        current_price = float(ticker_data.get("lastPrice", 0))
+        volume = float(ticker_data.get("volume24", 0))
+        
+        if current_price == 0 or volume < MIN_VOL_THRESHOLD:
+            return
+        
+        # Lưu giá hiện tại
+        LAST_PRICES[symbol] = {
+            "price": current_price,
+            "time": datetime.now()
+        }
+        
+        # Thiết lập base price nếu chưa có
+        if symbol not in BASE_PRICES:
+            BASE_PRICES[symbol] = current_price
+            return
+        
+        # Tính % thay đổi so với base price
+        base_price = BASE_PRICES[symbol]
+        change_pct = (current_price - base_price) / base_price * 100
+        
+        # Kiểm tra ngưỡng
+        now = datetime.now()
+        should_alert = False
+        
+        if change_pct >= PUMP_THRESHOLD or change_pct <= DUMP_THRESHOLD:
+            # Kiểm tra đã alert gần đây chưa (cooldown 60s)
+            last_alert = ALERTED_SYMBOLS.get(symbol)
+            if not last_alert or (now - last_alert).seconds > 60:
+                should_alert = True
+                ALERTED_SYMBOLS[symbol] = now
+        
+        if should_alert and SUBSCRIBERS:
+            msg = fmt_alert(symbol, base_price, current_price, change_pct)
+            
+            if change_pct >= PUMP_THRESHOLD:
+                print(f"🚀 PUMP: {symbol} {change_pct:+.2f}%")
+            else:
+                print(f"💥 DUMP: {symbol} {change_pct:+.2f}%")
+            
+            # Gửi alert
+            for chat in SUBSCRIBERS:
+                try:
+                    await context.bot.send_message(
+                        chat,
+                        msg,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    print(f"❌ Lỗi gửi tin nhắn: {e}")
+            
+            # Reset base price sau khi alert
+            BASE_PRICES[symbol] = current_price
+            
+    except Exception as e:
+        print(f"❌ Error processing ticker for {symbol}: {e}")
+
+
+async def reset_base_prices(context):
+    """Job reset base prices mỗi 1 phút để phát hiện pump/dump mới"""
+    global BASE_PRICES
+    
+    # Cập nhật base prices từ last prices
+    for symbol, data in LAST_PRICES.items():
+        BASE_PRICES[symbol] = data["price"]
+    
+    print(f"🔄 Reset {len(BASE_PRICES)} base prices")
 
 
 async def calc_movers(session, interval, symbols):
@@ -462,15 +592,15 @@ def main():
     app.add_handler(CommandHandler("coinlist", coinlist))
 
     jq = app.job_queue
-    # Quét pump/dump mỗi 15 giây (khung M1 cần update nhanh) - cho phép 3 instances song song
-    jq.run_repeating(job_scan_pumps_dumps, 15, first=10, job_kwargs={'max_instances': 3})
-    # Kiểm tra coin mới mỗi 5 phút
-    jq.run_repeating(job_new_listing, 300, first=30)
+    
+    # L\u1ea5y danh s\u00e1ch symbols v\u00e0 kh\u1edfi \u0111\u1ed9ng WebSocket
+    async def init_websocket(context):\n        global ALL_SYMBOLS\n        async with aiohttp.ClientSession() as session:\n            ALL_SYMBOLS = await get_all_symbols(session)\n            print(f\"\u2705 T\u00ecm th\u1ea5y {len(ALL_SYMBOLS)} coin\")\n        \n        # Kh\u1edfi \u0111\u1ed9ng WebSocket stream\n        asyncio.create_task(websocket_stream(context))\n    \n    # Ch\u1ea1y init ngay khi kh\u1edfi \u0111\u1ed9ng\n    jq.run_once(init_websocket, 5)\n    \n    # Reset base prices m\u1ed7i 1 ph\u00fat\n    jq.run_repeating(reset_base_prices, 60, first=65)\n    \n    # Ki\u1ec3m tra coin m\u1edbi m\u1ed7i 5 ph\u00fat\n    jq.run_repeating(job_new_listing, 300, first=30)
 
-    print("🔥 Bot quét MEXC Futures đang chạy...")
+    print("🔥 Bot quét MEXC Futures với WebSocket đang chạy...")
     print(f"📊 Ngưỡng pump: >= {PUMP_THRESHOLD}%")
     print(f"📊 Ngưỡng dump: <= {DUMP_THRESHOLD}%")
     print(f"💰 Volume tối thiểu: {MIN_VOL_THRESHOLD:,}")
+    print("🌐 WebSocket: Realtime price streaming")
     app.run_polling()
 
 

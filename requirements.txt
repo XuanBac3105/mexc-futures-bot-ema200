@@ -4,3 +4,4 @@ python-dotenv==1.0.0
 pytz==2024.1
 beautifulsoup4==4.14.2
 lxml==6.0.2
+websockets==12.0
