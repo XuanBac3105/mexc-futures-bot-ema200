@@ -69,6 +69,13 @@ async def get_kline(session, symbol, interval="Min5", limit=10):
     return closes, vols
 
 
+async def get_ticker(session, symbol):
+    """Lấy giá ticker hiện tại (realtime)"""
+    url = f"{FUTURES_BASE}/api/v1/contract/ticker/{symbol}"
+    data = await fetch_json(session, url)
+    return float(data["lastPrice"]) if data and "lastPrice" in data else None
+
+
 async def get_all_contracts(session):
     url = f"{FUTURES_BASE}/api/v1/contract/detail"
     data = await fetch_json(session, url)
@@ -143,14 +150,20 @@ async def calc_movers(session, interval, symbols):
     import asyncio
     
     async def get_single_mover(sym):
-        """Lấy dữ liệu cho 1 coin"""
+        """Lấy dữ liệu cho 1 coin - so sánh giá HIỆN TẠI vs candle cuối"""
         try:
+            # Lấy candle đã đóng (để có base price và volume)
             closes, vols = await get_kline(session, sym, interval, 2)
-            if len(closes) < 2 or closes[-2] == 0:
+            if len(closes) < 1 or closes[-1] == 0:
                 return None
             
-            old_price = closes[-2]
-            new_price = closes[-1]
+            # Lấy giá REALTIME hiện tại
+            current_price = await get_ticker(session, sym)
+            if not current_price:
+                return None
+            
+            old_price = closes[-1]  # Candle cuối đã đóng
+            new_price = current_price  # Giá HIỆN TẠI
             vol = vols[-1]
             
             chg = (new_price - old_price) / old_price * 100
@@ -543,8 +556,8 @@ def main():
     app.add_handler(CommandHandler("coinlist", coinlist))
 
     jq = app.job_queue
-    # Quét pump/dump mỗi 30 giây (nhanh hơn) - cho phép 2 instances chạy song song
-    jq.run_repeating(job_scan_pumps_dumps, 30, first=10, job_kwargs={'max_instances': 2})
+    # Quét pump/dump mỗi 15 giây (khung M1 cần update nhanh) - cho phép 3 instances song song
+    jq.run_repeating(job_scan_pumps_dumps, 15, first=10, job_kwargs={'max_instances': 3})
     # Kiểm tra coin mới mỗi 5 phút
     jq.run_repeating(job_new_listing, 300, first=30)
 
