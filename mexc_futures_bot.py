@@ -95,13 +95,17 @@ def fmt_top(title, data):
 
 
 def fmt_alert(symbol, old_price, new_price, change_pct):
-    """Format báo động pump/dump"""
+    """Format báo động pump/dump với link"""
     color = "🟢" if change_pct >= 0 else "🔴"
     icon = "🚀🚀🚀" if change_pct >= 0 else "💥💥💥"
     # Lấy tên coin (bỏ _USDT)
     coin_name = symbol.replace("_USDT", "")
+    
+    # Tạo link đến trang futures
+    link = f"https://www.mexc.co/vi-VN/futures/{symbol}?type=linear_swap"
+    
     return (
-        f"┌{icon} {coin_name} ⚡ {change_pct:+.2f}% {color}\n"
+        f"┌{icon} [{coin_name}]({link}) ⚡ {change_pct:+.2f}% {color}\n"
         f"└ {old_price:.6g} → {new_price:.6g}"
     )
 
