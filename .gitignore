@@ -13,3 +13,13 @@ build/
 venv/
 ENV/
 .DS_Store
+
+# Test files - tự động bỏ qua
+test_*.py
+*_test.py
+
+# HTML files - downloaded pages
+*.html
+
+# Logs
+*.log
