@@ -63,8 +63,10 @@ async def get_kline(session, symbol, interval="Min5", limit=10):
     url = f"{FUTURES_BASE}/api/v1/contract/kline/{symbol}"
     data = await fetch_json(session, url, {"interval": interval})
     closes = [float(x) for x in data["close"][-limit:]]
+    highs = [float(x) for x in data["high"][-limit:]]
+    lows = [float(x) for x in data["low"][-limit:]]
     vols = [float(v) for v in data["vol"][-limit:]]
-    return closes, vols
+    return closes, highs, lows, vols
 
 
 async def get_ticker(session, symbol):
@@ -146,10 +148,10 @@ async def calc_movers(session, interval, symbols):
     import asyncio
     
     async def get_single_mover(sym):
-        """Lấy dữ liệu cho 1 coin - so sánh giá HIỆN TẠI vs candle cuối"""
+        """Lấy dữ liệu cho 1 coin - so sánh giá HIỆN TẠI vs candle cuối (bao gồm HIGH/LOW để bắt râu)"""
         try:
-            # Lấy candle đã đóng (để có base price và volume)
-            closes, vols = await get_kline(session, sym, interval, 2)
+            # Lấy candle đã đóng (close, high, low, volume)
+            closes, highs, lows, vols = await get_kline(session, sym, interval, 2)
             if len(closes) < 1 or closes[-1] == 0:
                 return None
             
@@ -158,12 +160,31 @@ async def calc_movers(session, interval, symbols):
             if not current_price:
                 return None
             
-            old_price = closes[-1]  # Candle cuối đã đóng
-            new_price = current_price  # Giá HIỆN TẠI
+            # Giá base để tính % thay đổi
+            base_price = closes[-1]  # Candle đóng cửa
+            high_price = highs[-1]   # Giá cao nhất của candle
+            low_price = lows[-1]     # Giá thấp nhất của candle
             vol = vols[-1]
             
-            chg = (new_price - old_price) / old_price * 100
-            return (sym, chg, old_price, new_price, vol)
+            # Tính % thay đổi so với close
+            chg_from_close = (current_price - base_price) / base_price * 100
+            
+            # Kiểm tra xem giá hiện tại có vượt HIGH hoặc LOW không (phát hiện breakout)
+            chg_from_high = (current_price - high_price) / high_price * 100
+            chg_from_low = (current_price - low_price) / low_price * 100
+            
+            # Chọn % thay đổi lớn nhất để phát hiện các spike/wick
+            if abs(chg_from_close) >= abs(chg_from_high) and abs(chg_from_close) >= abs(chg_from_low):
+                chg = chg_from_close
+                old_price = base_price
+            elif abs(chg_from_high) > abs(chg_from_low):
+                chg = chg_from_high
+                old_price = high_price
+            else:
+                chg = chg_from_low
+                old_price = low_price
+            
+            return (sym, chg, old_price, current_price, vol)
         except Exception as e:
             return None
     
