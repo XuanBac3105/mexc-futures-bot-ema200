@@ -112,17 +112,25 @@ def fmt_top(title, data):
 
 
 def fmt_alert(symbol, old_price, new_price, change_pct):
-    """Format báo động pump/dump với deep link cho app"""
+    """Format báo động pump/dump"""
     color = "🟢" if change_pct >= 0 else "🔴"
     icon = "🚀🚀🚀" if change_pct >= 0 else "💥💥💥"
+    
+    # Biến động CỰC MẠNH >= 3% - thêm highlight đặc biệt
+    if abs(change_pct) >= 3.0:
+        icon = "🔥🚀🔥🚀🔥" if change_pct >= 0 else "🔥💥🔥💥🔥"
+        highlight = "⚠️ BIẾN ĐỘNG CỰC MẠNH ⚠️\n"
+    else:
+        highlight = ""
+    
     # Lấy tên coin (bỏ _USDT)
     coin_name = symbol.replace("_USDT", "")
     
     # Link đơn giản hơn để MEXC app dễ detect
-    # Bỏ /vi-VN/ và params để app intercept tốt hơn
     link = f"https://www.mexc.co/futures/{symbol}"
     
     return (
+        f"{highlight}"
         f"┌{icon} [{coin_name}]({link}) ⚡ {change_pct:+.2f}% {color}\n"
         f"└ {old_price:.6g} → {new_price:.6g}"
     )
