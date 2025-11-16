@@ -112,14 +112,15 @@ def fmt_top(title, data):
 
 
 def fmt_alert(symbol, old_price, new_price, change_pct):
-    """Format báo động pump/dump với link"""
+    """Format báo động pump/dump với deep link cho app"""
     color = "🟢" if change_pct >= 0 else "🔴"
     icon = "🚀🚀🚀" if change_pct >= 0 else "💥💥💥"
     # Lấy tên coin (bỏ _USDT)
     coin_name = symbol.replace("_USDT", "")
     
-    # Tạo link đến trang futures
-    link = f"https://www.mexc.co/vi-VN/futures/{symbol}?type=linear_swap"
+    # Link đơn giản hơn để MEXC app dễ detect
+    # Bỏ /vi-VN/ và params để app intercept tốt hơn
+    link = f"https://www.mexc.co/futures/{symbol}"
     
     return (
         f"┌{icon} [{coin_name}]({link}) ⚡ {change_pct:+.2f}% {color}\n"
@@ -131,8 +132,7 @@ def fmt_alert(symbol, old_price, new_price, change_pct):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
     await update.message.reply_text(
-        "🤖 Bot Quét MEXC Futures - WebSocket Realtime!\n\n"
-        "✅ WebSocket stream cho 722 coins\n"
+        "🤖 Bot Quét MEXC Futures !\n\n"
         "✅ Nhận giá REALTIME từ server\n"
         "✅ Báo NGAY LẬP TỨC khi ≥±2.3%\n"
         "✅ Dynamic base price - không miss pump/dump\n\n"
