@@ -25,8 +25,8 @@ FUTURES_BASE = "https://contract.mexc.co"
 WEBSOCKET_URL = "wss://contract.mexc.com/edge"  # MEXC Futures WebSocket endpoint
 
 # Ngưỡng để báo động (%)
-PUMP_THRESHOLD = 2.0    # Tăng >= 2% trong 1 phút
-DUMP_THRESHOLD = -2.0   # Giảm >= 2% trong 1 phút
+PUMP_THRESHOLD = 2.3    # Tăng >= 2.3%
+DUMP_THRESHOLD = -2.3   # Giảm >= 2.3%
 
 # Volume tối thiểu để tránh coin ít thanh khoản
 MIN_VOL_THRESHOLD = 100000
@@ -134,8 +134,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 Bot Quét MEXC Futures - WebSocket Realtime!\n\n"
         "✅ WebSocket stream cho 722 coins\n"
         "✅ Nhận giá REALTIME từ server\n"
-        "✅ Báo NGAY LẬP TỨC khi ≥±2%\n"
-        "✅ Không miss bất kỳ pump/dump nào\n\n"
+        "✅ Báo NGAY LẬP TỨC khi ≥±2.3%\n"
+        "✅ Dynamic base price - không miss pump/dump\n\n"
         "Các lệnh:\n"
         "/subscribe – bật báo động\n"
         "/unsubscribe – tắt báo động\n"
@@ -203,7 +203,7 @@ async def websocket_stream(context):
 
 
 async def process_ticker(ticker_data, context):
-    """Xử lý ticker data từ WebSocket và phát hiện pump/dump"""
+    """Xử lý ticker data từ WebSocket và phát hiện pump/dump - DYNAMIC BASE PRICE"""
     symbol = ticker_data.get("symbol")
     if not symbol:
         return
@@ -230,14 +230,14 @@ async def process_ticker(ticker_data, context):
         base_price = BASE_PRICES[symbol]
         change_pct = (current_price - base_price) / base_price * 100
         
-        # Kiểm tra ngưỡng
-        now = datetime.now()
+        # Kiểm tra ngưỡng - KHÔNG CẦN COOLDOWN DÀI, dynamic base price tự điều chỉnh
         should_alert = False
         
         if change_pct >= PUMP_THRESHOLD or change_pct <= DUMP_THRESHOLD:
-            # Kiểm tra đã alert gần đây chưa (cooldown 60s)
+            # Kiểm tra cooldown ngắn (10s) để tránh spam quá nhiều
+            now = datetime.now()
             last_alert = ALERTED_SYMBOLS.get(symbol)
-            if not last_alert or (now - last_alert).seconds > 60:
+            if not last_alert or (now - last_alert).seconds > 10:
                 should_alert = True
                 ALERTED_SYMBOLS[symbol] = now
         
@@ -261,22 +261,24 @@ async def process_ticker(ticker_data, context):
                 except Exception as e:
                     print(f"❌ Lỗi gửi tin nhắn: {e}")
             
-            # Reset base price sau khi alert
+            # DYNAMIC: TỰ ĐỘNG reset base price ngay sau khi alert
+            # → Phát hiện pump/dump mới ngay lập tức
             BASE_PRICES[symbol] = current_price
+            print(f"🔄 Reset base price cho {symbol}: {current_price:.6g}")
             
     except Exception as e:
         print(f"❌ Error processing ticker for {symbol}: {e}")
 
 
 async def reset_base_prices(context):
-    """Job reset base prices mỗi 1 phút để phát hiện pump/dump mới"""
+    """Job backup reset base prices mỗi 5 phút (dynamic reset là chính)"""
     global BASE_PRICES
     
     # Cập nhật base prices từ last prices
     for symbol, data in LAST_PRICES.items():
         BASE_PRICES[symbol] = data["price"]
     
-    print(f"🔄 Reset {len(BASE_PRICES)} base prices")
+    print(f"🔄 Backup reset {len(BASE_PRICES)} base prices")
 
 
 async def calc_movers(session, interval, symbols):
@@ -612,8 +614,8 @@ def main():
     # Chạy init ngay khi khởi động
     jq.run_once(init_websocket, 5)
     
-    # Reset base prices mỗi 1 phút
-    jq.run_repeating(reset_base_prices, 60, first=65)
+    # Backup reset base prices mỗi 5 phút (dynamic reset là chính)
+    jq.run_repeating(reset_base_prices, 300, first=305)
     
     # Kiểm tra coin mới mỗi 5 phút
     jq.run_repeating(job_new_listing, 300, first=30)
