@@ -307,8 +307,9 @@ async def process_ticker(ticker_data, context):
         long_base = LONG_BASE_PRICES[symbol]
         long_change = (current_price - long_base) / long_base * 100
         
-        # Reset LONG_BASE khi giá quay về gần mức ban đầu (trong vòng ±1%)
-        if abs(long_change) < 1.0:
+        # Reset LONG_BASE chỉ khi CẢ SHORT và LONG đều gần base (không có biến động)
+        # Tránh reset LONG_BASE khi SHORT đang trigger alert
+        if abs(long_change) < 1.0 and abs(short_change) < 1.0:
             LONG_BASE_PRICES[symbol] = current_price
         
         # Kiểm tra ngưỡng với SHORT_BASE
@@ -323,6 +324,10 @@ async def process_ticker(ticker_data, context):
                 ALERTED_SYMBOLS[symbol] = now
         
         if should_alert and SUBSCRIBERS:
+            # Debug: Kiểm tra nếu LONG_CHANGE < 2.5% nhưng vẫn alert
+            if abs(long_change) < 2.5:
+                print(f"⚠️ DEBUG: {symbol} SHORT={short_change:.2f}% LONG={long_change:.2f}% base_short={short_base:.6g} base_long={long_base:.6g} current={current_price:.6g}")
+            
             # Dùng LONG_CHANGE để xác định mức độ biến động (thường hay cực mạnh)
             msg = fmt_alert(symbol, long_base, current_price, long_change)
             
@@ -336,17 +341,24 @@ async def process_ticker(ticker_data, context):
             for chat in SUBSCRIBERS:
                 mode = ALERT_MODE.get(chat, 1)  # Mặc định mode 1
                 
-                # Mode 1: Báo tất cả
+                # FILTER: Chỉ gửi nếu LONG_CHANGE cũng đủ lớn (tránh alert giả)
+                # Mode 1: Báo khi LONG_CHANGE ≥2.5%
                 # Mode 2: Chỉ báo biến động mạnh ≥3%
-                if mode == 1 or (mode == 2 and abs(long_change) >= 3.0):
-                    tasks.append(
-                        context.bot.send_message(
-                            chat,
-                            msg,
-                            parse_mode="Markdown",
-                            disable_web_page_preview=True
-                        )
+                if mode == 1:
+                    if abs(long_change) < 2.5:
+                        continue  # Skip nếu % thực tế < 2.5%
+                elif mode == 2:
+                    if abs(long_change) < 3.0:
+                        continue  # Skip nếu % thực tế < 3%
+                
+                tasks.append(
+                    context.bot.send_message(
+                        chat,
+                        msg,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
                     )
+                )
             
             if tasks:
                 try:
@@ -680,12 +692,32 @@ async def post_init(app):
         BotCommand("coinlist", "Coin đã list trong 1 tuần qua"),
     ]
     
-    await app.bot.set_my_commands(commands)
-    print("✅ Đã thiết lập menu lệnh bot")
+    # Retry logic cho set_my_commands (tránh timeout khi khởi động)
+    for attempt in range(3):
+        try:
+            await app.bot.set_my_commands(commands)
+            print("✅ Đã thiết lập menu lệnh bot")
+            break
+        except Exception as e:
+            print(f"⚠️ Lỗi set commands (attempt {attempt+1}/3): {e}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+            else:
+                print("⚠️ Skip set commands, bot vẫn hoạt động bình thường")
 
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    # Tăng timeout cho Telegram API (Railway có thể chậm)
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=30.0,  # Tăng từ mặc định 5s
+        read_timeout=30.0,     # Tăng từ mặc định 5s
+        write_timeout=30.0,
+        pool_timeout=30.0
+    )
+    
+    app = ApplicationBuilder().token(BOT_TOKEN).request(request).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("subscribe", subscribe))
