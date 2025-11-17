@@ -321,7 +321,11 @@ async def process_ticker(ticker_data, context):
         if trigger_by_short:
             # Nếu LONG_CHANGE quá nhỏ => skip alert và log rõ lý do
             if abs(long_change) < PUMP_THRESHOLD:
-                print(f"⚠️ SKIP_ALERT (LONG too small): {symbol} SHORT={short_change:.2f}% LONG={long_change:.2f}% base_short={short_base:.6g} base_long={long_base:.6g} current={current_price:.6g}")
+                # Kiểm tra cooldown trước khi log để tránh spam
+                last_alert = ALERTED_SYMBOLS.get(symbol)
+                if not last_alert or (now - last_alert).total_seconds() > 5.0:
+                    print(f"⚠️ SKIP_ALERT (LONG too small): {symbol} SHORT={short_change:.2f}% LONG={long_change:.2f}% base_short={short_base:.6g} base_long={long_base:.6g} current={current_price:.6g}")
+                    ALERTED_SYMBOLS[symbol] = now  # Đánh dấu để tránh spam log
             else:
                 # Kiểm tra cooldown ngắn (5s) để tránh spam quá nhiều
                 last_alert = ALERTED_SYMBOLS.get(symbol)
@@ -330,8 +334,8 @@ async def process_ticker(ticker_data, context):
                     ALERTED_SYMBOLS[symbol] = now
 
         if should_alert and SUBSCRIBERS:
-            # Dùng LONG_CHANGE để xác định mức độ biến động (thường hay cực mạnh)
-            msg = fmt_alert(symbol, long_base, current_price, long_change)
+            # Dùng SHORT_BASE (giá đầu nến) và SHORT_CHANGE (% thay đổi trong nến)
+            msg = fmt_alert(symbol, short_base, current_price, short_change)
 
             if short_change >= PUMP_THRESHOLD:
                 print(f"🚀 PUMP: {symbol} +{short_change:.2f}% (Total: +{long_change:.2f}%)")
