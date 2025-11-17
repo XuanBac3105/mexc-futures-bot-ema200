@@ -25,13 +25,14 @@ FUTURES_BASE = "https://contract.mexc.co"
 WEBSOCKET_URL = "wss://contract.mexc.com/edge"  # MEXC Futures WebSocket endpoint
 
 # Ngưỡng để báo động (%)
-PUMP_THRESHOLD = 2.3    # Tăng >= 2.3%
-DUMP_THRESHOLD = -2.3   # Giảm >= 2.3%
+PUMP_THRESHOLD = 2.5    # Tăng >= 2.5%
+DUMP_THRESHOLD = -2.5   # Giảm >= 2.5%
 
 # Volume tối thiểu để tránh coin ít thanh khoản
 MIN_VOL_THRESHOLD = 100000
 
 SUBSCRIBERS = set()
+ALERT_MODE = {}  # {chat_id: mode} - 1: tất cả, 2: chỉ biến động mạnh ≥3%
 KNOWN_SYMBOLS = set()  # Danh sách coin đã biết
 ALL_SYMBOLS = []  # Cache danh sách coin
 
@@ -147,15 +148,25 @@ def fmt_alert(symbol, old_price, new_price, change_pct):
 
 # ================== COMMANDS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    SUBSCRIBERS.add(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    SUBSCRIBERS.add(chat_id)
+    if chat_id not in ALERT_MODE:
+        ALERT_MODE[chat_id] = 1  # Mặc định: tất cả
+    
+    current_mode = ALERT_MODE.get(chat_id, 1)
+    mode_text = "Tất cả (≥2.5%)" if current_mode == 1 else "Chỉ biến động mạnh (≥3%)"
+    
     await update.message.reply_text(
         "🤖 Bot Quét MEXC Futures !\n\n"
         "✅ Nhận giá REALTIME từ server\n"
-        "✅ Báo NGAY LẬP TỨC khi ≥±2.3%\n"
+        "✅ Báo NGAY LẬP TỨC khi ≥±2.5%\n"
         "✅ Dynamic base price - không miss pump/dump\n\n"
+        f"📊 Chế độ hiện tại: {mode_text}\n\n"
         "Các lệnh:\n"
         "/subscribe – bật báo động\n"
         "/unsubscribe – tắt báo động\n"
+        "/mode1 – báo tất cả (≥2.5%)\n"
+        "/mode2 – chỉ báo biến động mạnh (≥3%)\n"
         "/timelist – lịch coin sắp list\n"
         "/coinlist – coin vừa list gần đây"
     )
@@ -171,11 +182,42 @@ async def unsubscribe(update, context):
     await update.message.reply_text("Đã tắt báo!")
 
 
+async def mode1(update, context):
+    chat_id = update.effective_chat.id
+    ALERT_MODE[chat_id] = 1
+    await update.message.reply_text(
+        "✅ Đã chuyển sang Mode 1\n\n"
+        "📊 Báo TẤT CẢ biến động ≥±2.5%:\n"
+        "  🚀 Thông thường (2.5-2.9%)\n"
+        "  ⚡ Biến động mạnh (3-3.9%)\n"
+        "  🔥 Biến động cực mạnh (≥4%)"
+    )
+
+
+async def mode2(update, context):
+    chat_id = update.effective_chat.id
+    ALERT_MODE[chat_id] = 2
+    await update.message.reply_text(
+        "✅ Đã chuyển sang Mode 2\n\n"
+        "📊 CHỈ báo biến động mạnh ≥±3%:\n"
+        "  ⚡ Biến động mạnh (3-3.9%)\n"
+        "  🔥 Biến động cực mạnh (≥4%)"
+    )
+
+
 async def websocket_stream(context):
     """WebSocket stream để nhận giá realtime từ MEXC Futures"""
+    reconnect_delay = 5
+    
     while True:
         try:
-            async with websockets.connect(WEBSOCKET_URL) as ws:
+            # Tăng timeout và thêm ping interval
+            async with websockets.connect(
+                WEBSOCKET_URL,
+                ping_interval=20,  # Ping server mỗi 20s để giữ kết nối
+                ping_timeout=10,   # Timeout cho pong response
+                close_timeout=10
+            ) as ws:
                 print(f"✅ Kết nối WebSocket thành công")
                 
                 # Subscribe tất cả ticker streams - MEXC Futures format
@@ -191,6 +233,9 @@ async def websocket_stream(context):
                     await asyncio.sleep(0.005)  # 5ms delay giữa subscriptions
                 
                 print(f"✅ Đã subscribe {len(ALL_SYMBOLS)} coin qua WebSocket")
+                
+                # Reset reconnect delay sau khi connect thành công
+                reconnect_delay = 5
                 
                 # Lắng nghe messages
                 async for message in ws:
@@ -215,8 +260,11 @@ async def websocket_stream(context):
                         
         except Exception as e:
             print(f"❌ WebSocket error: {e}")
-            print("🔄 Reconnecting in 5s...")
-            await asyncio.sleep(5)
+            print(f"🔄 Reconnecting in {reconnect_delay}s...")
+            await asyncio.sleep(reconnect_delay)
+            
+            # Exponential backoff: 5s -> 10s -> 20s -> max 60s
+            reconnect_delay = min(reconnect_delay * 2, 60)
 
 
 async def process_ticker(ticker_data, context):
@@ -266,7 +314,8 @@ async def process_ticker(ticker_data, context):
         # Kiểm tra ngưỡng với SHORT_BASE
         should_alert = False
         
-        if short_change >= PUMP_THRESHOLD or short_change <= DUMP_THRESHOLD:
+        # CHỈ alert khi SHORT_CHANGE đủ lớn VÀ không phải đầu nến (giây 0-2)
+        if (short_change >= PUMP_THRESHOLD or short_change <= DUMP_THRESHOLD) and current_second > 2:
             # Kiểm tra cooldown ngắn (5s) để tránh spam quá nhiều
             last_alert = ALERTED_SYMBOLS.get(symbol)
             if not last_alert or (now - last_alert).seconds > 5:
@@ -282,20 +331,28 @@ async def process_ticker(ticker_data, context):
             else:
                 print(f"💥 DUMP: {symbol} {short_change:.2f}% (Total: {long_change:.2f}%)")
             
-            # Gửi alert PARALLEL để nhanh hơn
-            tasks = [
-                context.bot.send_message(
-                    chat,
-                    msg,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
-                )
-                for chat in SUBSCRIBERS
-            ]
-            try:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            except Exception as e:
-                print(f"❌ Lỗi gửi tin nhắn: {e}")
+            # Gửi alert theo ALERT_MODE của từng user
+            tasks = []
+            for chat in SUBSCRIBERS:
+                mode = ALERT_MODE.get(chat, 1)  # Mặc định mode 1
+                
+                # Mode 1: Báo tất cả
+                # Mode 2: Chỉ báo biến động mạnh ≥3%
+                if mode == 1 or (mode == 2 and abs(long_change) >= 3.0):
+                    tasks.append(
+                        context.bot.send_message(
+                            chat,
+                            msg,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                    )
+            
+            if tasks:
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except Exception as e:
+                    print(f"❌ Lỗi gửi tin nhắn: {e}")
             
     except Exception as e:
         print(f"❌ Error processing ticker for {symbol}: {e}")
@@ -617,6 +674,8 @@ async def post_init(app):
         BotCommand("start", "Khởi động bot và xem hướng dẫn"),
         BotCommand("subscribe", "Bật thông báo pump/dump tự động"),
         BotCommand("unsubscribe", "Tắt thông báo tự động"),
+        BotCommand("mode1", "Báo tất cả (≥2.5%)"),
+        BotCommand("mode2", "Chỉ báo biến động mạnh (≥3%)"),
         BotCommand("timelist", "Lịch coin sắp list trong 1 tuần"),
         BotCommand("coinlist", "Coin đã list trong 1 tuần qua"),
     ]
@@ -631,6 +690,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    app.add_handler(CommandHandler("mode1", mode1))
+    app.add_handler(CommandHandler("mode2", mode2))
     app.add_handler(CommandHandler("timelist", timelist))
     app.add_handler(CommandHandler("coinlist", coinlist))
 
