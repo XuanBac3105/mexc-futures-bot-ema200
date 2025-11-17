@@ -312,45 +312,43 @@ async def process_ticker(ticker_data, context):
         if abs(long_change) < 1.0 and abs(short_change) < 1.0:
             LONG_BASE_PRICES[symbol] = current_price
         
-        # Kiểm tra ngưỡng với SHORT_BASE
+        # Kiểm tra ngưỡng với SHORT_BASE và kiểm tra LONG_CHANGE trước khi alert
         should_alert = False
-        
-        # CHỈ alert khi SHORT_CHANGE đủ lớn VÀ không phải đầu nến (giây 0-2)
-        if (short_change >= PUMP_THRESHOLD or short_change <= DUMP_THRESHOLD) and current_second > 2:
-            # Kiểm tra cooldown ngắn (5s) để tránh spam quá nhiều
-            last_alert = ALERTED_SYMBOLS.get(symbol)
-            if not last_alert or (now - last_alert).seconds > 5:
-                should_alert = True
-                ALERTED_SYMBOLS[symbol] = now
-        
+
+        # Nếu SHORT_CHANGE vượt ngưỡng và không phải đầu nến thì xem tiếp LONG_CHANGE
+        trigger_by_short = (short_change >= PUMP_THRESHOLD or short_change <= DUMP_THRESHOLD) and current_second > 2
+
+        if trigger_by_short:
+            # Nếu LONG_CHANGE quá nhỏ => skip alert và log rõ lý do
+            if abs(long_change) < PUMP_THRESHOLD:
+                print(f"⚠️ SKIP_ALERT (LONG too small): {symbol} SHORT={short_change:.2f}% LONG={long_change:.2f}% base_short={short_base:.6g} base_long={long_base:.6g} current={current_price:.6g}")
+            else:
+                # Kiểm tra cooldown ngắn (5s) để tránh spam quá nhiều
+                last_alert = ALERTED_SYMBOLS.get(symbol)
+                if not last_alert or (now - last_alert).total_seconds() > 5.0:
+                    should_alert = True
+                    ALERTED_SYMBOLS[symbol] = now
+
         if should_alert and SUBSCRIBERS:
-            # Debug: Kiểm tra nếu LONG_CHANGE < 2.5% nhưng vẫn alert
-            if abs(long_change) < 2.5:
-                print(f"⚠️ DEBUG: {symbol} SHORT={short_change:.2f}% LONG={long_change:.2f}% base_short={short_base:.6g} base_long={long_base:.6g} current={current_price:.6g}")
-            
             # Dùng LONG_CHANGE để xác định mức độ biến động (thường hay cực mạnh)
             msg = fmt_alert(symbol, long_base, current_price, long_change)
-            
+
             if short_change >= PUMP_THRESHOLD:
                 print(f"🚀 PUMP: {symbol} +{short_change:.2f}% (Total: +{long_change:.2f}%)")
             else:
                 print(f"💥 DUMP: {symbol} {short_change:.2f}% (Total: {long_change:.2f}%)")
-            
-            # Gửi alert theo ALERT_MODE của từng user
+
+            # Gửi alert theo ALERT_MODE của từng user (mode vẫn áp dụng)
             tasks = []
             for chat in SUBSCRIBERS:
                 mode = ALERT_MODE.get(chat, 1)  # Mặc định mode 1
-                
-                # FILTER: Chỉ gửi nếu LONG_CHANGE cũng đủ lớn (tránh alert giả)
-                # Mode 1: Báo khi LONG_CHANGE ≥2.5%
+
+                # Mode 1: Báo tất cả (LONG_CHANGE đã >= PUMP_THRESHOLD ở trên)
                 # Mode 2: Chỉ báo biến động mạnh ≥3%
-                if mode == 1:
-                    if abs(long_change) < 2.5:
-                        continue  # Skip nếu % thực tế < 2.5%
-                elif mode == 2:
-                    if abs(long_change) < 3.0:
-                        continue  # Skip nếu % thực tế < 3%
-                
+                if mode == 2 and abs(long_change) < 3.0:
+                    # Trong mode2 thì còn phải lớn hơn 3%
+                    continue
+
                 tasks.append(
                     context.bot.send_message(
                         chat,
@@ -359,7 +357,7 @@ async def process_ticker(ticker_data, context):
                         disable_web_page_preview=True
                     )
                 )
-            
+
             if tasks:
                 try:
                     await asyncio.gather(*tasks, return_exceptions=True)
