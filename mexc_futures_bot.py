@@ -38,8 +38,7 @@ ALL_SYMBOLS = []  # Cache danh sách coin
 
 # WebSocket price tracking
 LAST_PRICES = {}  # {symbol: {"price": float, "time": datetime}}
-BASE_PRICES = {}  # {symbol: base_price} - SHORT_BASE: reset mỗi phút để phát hiện nhanh
-LONG_BASE_PRICES = {}  # {symbol: base_price} - LONG_BASE: tracking trend dài hạn
+BASE_PRICES = {}  # {symbol: base_price} - Dynamic reset: chỉ reset sau khi alert
 ALERTED_SYMBOLS = {}  # {symbol: timestamp} - tránh spam alert
 
 
@@ -292,65 +291,42 @@ async def process_ticker(ticker_data, context):
         # Thiết lập base price nếu chưa có
         if symbol not in BASE_PRICES:
             BASE_PRICES[symbol] = current_price
-            LONG_BASE_PRICES[symbol] = current_price
             return
         
-        # RESET SHORT_BASE mỗi phút (giây 0-2) để bắt đầu nến mới
-        if current_second <= 2:
-            BASE_PRICES[symbol] = current_price
+        # Tính % thay đổi từ BASE_PRICE (dynamic - chỉ reset sau alert)
+        base_price = BASE_PRICES[symbol]
+        price_change = (current_price - base_price) / base_price * 100
         
-        # Tính % thay đổi từ SHORT_BASE (phát hiện nhanh)
-        short_base = BASE_PRICES[symbol]
-        short_change = (current_price - short_base) / short_base * 100
-        
-        # Tính % thay đổi từ LONG_BASE (xác định mức độ)
-        long_base = LONG_BASE_PRICES[symbol]
-        long_change = (current_price - long_base) / long_base * 100
-        
-        # Reset LONG_BASE chỉ khi CẢ SHORT và LONG đều gần base (không có biến động)
-        # Tránh reset LONG_BASE khi SHORT đang trigger alert
-        if abs(long_change) < 1.0 and abs(short_change) < 1.0:
-            LONG_BASE_PRICES[symbol] = current_price
-        
-        # Kiểm tra ngưỡng với SHORT_BASE và kiểm tra LONG_CHANGE trước khi alert
+        # Kiểm tra ngưỡng và cooldown
         should_alert = False
-
-        # Nếu SHORT_CHANGE vượt ngưỡng và không phải đầu nến thì xem tiếp LONG_CHANGE
-        trigger_by_short = (short_change >= PUMP_THRESHOLD or short_change <= DUMP_THRESHOLD) and current_second > 2
-
-        if trigger_by_short:
-            # Nếu LONG_CHANGE quá nhỏ => skip alert và log rõ lý do
-            if abs(long_change) < PUMP_THRESHOLD:
-                # Kiểm tra cooldown trước khi log để tránh spam
-                last_alert = ALERTED_SYMBOLS.get(symbol)
-                if not last_alert or (now - last_alert).total_seconds() > 5.0:
-                    print(f"⚠️ SKIP_ALERT (LONG too small): {symbol} SHORT={short_change:.2f}% LONG={long_change:.2f}% base_short={short_base:.6g} base_long={long_base:.6g} current={current_price:.6g}")
-                    ALERTED_SYMBOLS[symbol] = now  # Đánh dấu để tránh spam log
-            else:
-                # Kiểm tra cooldown ngắn (5s) để tránh spam quá nhiều
-                last_alert = ALERTED_SYMBOLS.get(symbol)
-                if not last_alert or (now - last_alert).total_seconds() > 5.0:
-                    should_alert = True
-                    ALERTED_SYMBOLS[symbol] = now
+        
+        if (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD) and current_second > 2:
+            # Kiểm tra cooldown (5s) để tránh spam
+            last_alert = ALERTED_SYMBOLS.get(symbol)
+            if not last_alert or (now - last_alert).total_seconds() > 5.0:
+                should_alert = True
+                ALERTED_SYMBOLS[symbol] = now
 
         if should_alert and SUBSCRIBERS:
-            # Dùng SHORT_BASE (giá đầu nến) và SHORT_CHANGE (% thay đổi trong nến)
-            msg = fmt_alert(symbol, short_base, current_price, short_change)
+            # Dùng BASE_PRICE và hiển thị % thay đổi
+            msg = fmt_alert(symbol, base_price, current_price, price_change)
 
-            if short_change >= PUMP_THRESHOLD:
-                print(f"🚀 PUMP: {symbol} +{short_change:.2f}% (Total: +{long_change:.2f}%)")
+            if price_change >= PUMP_THRESHOLD:
+                print(f"🚀 PUMP: {symbol} +{price_change:.2f}%")
             else:
-                print(f"💥 DUMP: {symbol} {short_change:.2f}% (Total: {long_change:.2f}%)")
+                print(f"💥 DUMP: {symbol} {price_change:.2f}%")
 
-            # Gửi alert theo ALERT_MODE của từng user (mode vẫn áp dụng)
+            # Reset base price SAU KHI alert (dynamic reset)
+            BASE_PRICES[symbol] = current_price
+
+            # Gửi alert theo ALERT_MODE của từng user
             tasks = []
             for chat in SUBSCRIBERS:
                 mode = ALERT_MODE.get(chat, 1)  # Mặc định mode 1
 
-                # Mode 1: Báo tất cả (LONG_CHANGE đã >= PUMP_THRESHOLD ở trên)
+                # Mode 1: Báo tất cả >= 2.5%
                 # Mode 2: Chỉ báo biến động mạnh ≥3%
-                if mode == 2 and abs(long_change) < 3.0:
-                    # Trong mode2 thì còn phải lớn hơn 3%
+                if mode == 2 and abs(price_change) < 3.0:
                     continue
 
                 tasks.append(
@@ -374,15 +350,14 @@ async def process_ticker(ticker_data, context):
 
 async def reset_base_prices(context):
     """Job backup reset base prices mỗi 5 phút"""
-    global BASE_PRICES, LONG_BASE_PRICES
+    global BASE_PRICES
     
-    # Cập nhật base prices từ last prices
+    # Cập nhật base prices từ last prices (chỉ cho coin không có alert gần đây)
     for symbol, data in LAST_PRICES.items():
-        BASE_PRICES[symbol] = data["price"]
-        # Reset LONG_BASE nếu không có biến động mạnh gần đây
+        # Chỉ reset nếu không có alert trong 5 phút qua
         if symbol not in ALERTED_SYMBOLS or \
            (datetime.now() - ALERTED_SYMBOLS[symbol]).seconds > 300:
-            LONG_BASE_PRICES[symbol] = data["price"]
+            BASE_PRICES[symbol] = data["price"]
     
     print(f"🔄 Backup reset {len(BASE_PRICES)} base prices")
 
