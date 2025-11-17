@@ -751,7 +751,14 @@ def main():
     print(f"📊 Ngưỡng dump: <= {DUMP_THRESHOLD}%")
     print(f"💰 Volume tối thiểu: {MIN_VOL_THRESHOLD:,}")
     print("🌐 WebSocket: Realtime price streaming")
-    app.run_polling()
+    
+    # Chạy với graceful shutdown
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except KeyboardInterrupt:
+        print("🛑 Bot đang tắt...")
+    except Exception as e:
+        print(f"❌ Bot error: {e}")
 
 
 if __name__ == "__main__":
