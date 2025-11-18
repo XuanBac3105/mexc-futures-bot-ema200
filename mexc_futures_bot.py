@@ -27,8 +27,10 @@ FUTURES_BASE = "https://contract.mexc.co"
 WEBSOCKET_URL = "wss://contract.mexc.com/edge"  # MEXC Futures WebSocket endpoint
 
 # Ngưỡng để báo động (%)
-PUMP_THRESHOLD = 2.5    # Tăng >= 2.5%
-DUMP_THRESHOLD = -2.5   # Giảm >= 2.5%
+PUMP_THRESHOLD = 3.0      # Tăng >= 3%
+DUMP_THRESHOLD = -3.0     # Giảm >= 3%
+MODERATE_MAX = 5.0        # Ngưỡng giữa (3-5%)
+EXTREME_THRESHOLD = 10.0  # Ngưỡng cực mạnh >= 10%
 
 # Volume tối thiểu để tránh coin ít thanh khoản
 MIN_VOL_THRESHOLD = 100000
@@ -119,24 +121,22 @@ def fmt_top(title, data):
 
 
 def fmt_alert(symbol, old_price, new_price, change_pct):
-    """Format báo động pump/dump với 3 mức độ"""
+    """Format báo động pump/dump với 2 mức độ: trung bình (3-5%) và cực mạnh (≥10%)"""
     color = "🟢" if change_pct >= 0 else "🔴"
     
-    # Phân loại 3 mức độ biến động
+    # Phân loại 2 mức độ biến động
     abs_change = abs(change_pct)
     
-    if abs_change >= 4.0:
-        # Mức 3: BIẾN ĐỘNG CỰC MẠNH >= 4%
+    if abs_change >= 10.0:
+        # Mức 2: BIẾN ĐỘNG CỰC MẠNH >= 10%
         icon = "🔥🚀🔥🚀🔥" if change_pct >= 0 else "🔥💥🔥💥🔥"
-        highlight = "⚠️ BIẾN ĐỘNG CỰC MẠNH ⚠️\n"
-    elif abs_change >= 3.0:
-        # Mức 2: BIẾN ĐỘNG MẠNH 3-3.9%
-        icon = "⚡🚀⚡🚀⚡" if change_pct >= 0 else "⚡💥⚡💥⚡"
-        highlight = "🔔 BIẾN ĐỘNG MẠNH 🔔\n"
+        highlight = "╔═══════════════════════════╗\n⚠️  BIẾN ĐỘNG CỰC MẠNH  ⚠️\n╚═══════════════════════════╝\n"
+        size_tag = f"*{change_pct:+.2f}%*"  # Bold cho số %
     else:
-        # Mức 1: Thông thường 2.3-2.9%
-        icon = "🚀🚀🚀" if change_pct >= 0 else "💥💥💥"
+        # Mức 1: Trung bình 3-9.9%
+        icon = "🔸🚀🔸🚀🔸" if change_pct >= 0 else "🔸💥🔸💥🔸"
         highlight = ""
+        size_tag = f"{change_pct:+.2f}%"
     
     # Lấy tên coin (bỏ _USDT)
     coin_name = symbol.replace("_USDT", "")
@@ -146,8 +146,8 @@ def fmt_alert(symbol, old_price, new_price, change_pct):
     
     return (
         f"{highlight}"
-        f"┌{icon} [{coin_name}]({link}) ⚡ {change_pct:+.2f}% {color}\n"
-        f"└ {old_price:.6g} → {new_price:.6g}"
+        f"┌{icon} *[{coin_name}]({link})* ⚡ {size_tag} {color}\n"
+        f"└ `{old_price:.6g}` → `{new_price:.6g}`"
     )
 
 
@@ -182,19 +182,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_MODE[chat_id] = 1  # Mặc định: tất cả
     
     current_mode = ALERT_MODE.get(chat_id, 1)
-    mode_text = "Tất cả (≥2.5%)" if current_mode == 1 else "Chỉ biến động mạnh (≥3%)"
+    if current_mode == 1:
+        mode_text = "Tất cả (3-5% + ≥1%)"
+    elif current_mode == 2:
+        mode_text = "Chỉ trung bình (3-5%)"
+    else:
+        mode_text = "Chỉ cực mạnh (≥10%)"
     
     await update.message.reply_text(
         "🤖 Bot Quét MEXC Futures !\n\n"
         "✅ Nhận giá REALTIME từ server\n"
-        "✅ Báo NGAY LẬP TỨC khi ≥±2.5%\n"
+        "✅ Báo NGAY LẬP TỨC khi ≥3%\n"
         "✅ Dynamic base price - không miss pump/dump\n\n"
         f"📊 Chế độ hiện tại: {mode_text}\n\n"
         "Các lệnh:\n"
         "/subscribe – bật báo động\n"
         "/unsubscribe – tắt báo động\n"
-        "/mode1 – báo tất cả (≥2.5%)\n"
-        "/mode2 – chỉ báo biến động mạnh (≥3%)\n"
+        "/mode1 – báo tất cả (3-5% + ≥10%)\n"
+        "/mode2 – chỉ báo 3-5%\n"
+        "/mode3 – chỉ báo ≥10%\n"
         "/mute COIN – tắt thông báo coin\n"
         "/unmute COIN – bật lại thông báo coin\n"
         "/mutelist – xem danh sách coin đã mute\n"
@@ -221,10 +227,9 @@ async def mode1(update, context):
     ALERT_MODE[chat_id] = 1
     await update.message.reply_text(
         "✅ Đã chuyển sang Mode 1\n\n"
-        "📊 Báo TẤT CẢ biến động ≥±2.5%:\n"
-        "  🚀 Thông thường (2.5-2.9%)\n"
-        "  ⚡ Biến động mạnh (3-3.9%)\n"
-        "  🔥 Biến động cực mạnh (≥4%)"
+        "📊 Báo TẤT CẢ biến động:\n"
+        "  🔸 Trung bình (3-5%)\n"
+        "  🔥 Cực mạnh (≥10%)"
     )
 
 
@@ -234,9 +239,19 @@ async def mode2(update, context):
     ALERT_MODE[chat_id] = 2
     await update.message.reply_text(
         "✅ Đã chuyển sang Mode 2\n\n"
-        "📊 CHỈ báo biến động mạnh ≥±3%:\n"
-        "  ⚡ Biến động mạnh (3-3.9%)\n"
-        "  🔥 Biến động cực mạnh (≥4%)"
+        "📊 CHỊ báo biến động trung bình:\n"
+        "  🔸 3-5% (bỏ qua cực mạnh ≥10%)"
+    )
+
+
+@admin_only
+async def mode3(update, context):
+    chat_id = update.effective_chat.id
+    ALERT_MODE[chat_id] = 3
+    await update.message.reply_text(
+        "✅ Đã chuyển sang Mode 3\n\n"
+        "📊 CHỊ báo biến động CỰC MẠNH:\n"
+        "  🔥 ≥10% (bỏ qua 3-5%)"
     )
 
 
@@ -434,11 +449,21 @@ async def process_ticker(ticker_data, context):
                     continue
                 
                 mode = ALERT_MODE.get(chat, 1)  # Mặc định mode 1
+                abs_change = abs(price_change)
 
-                # Mode 1: Báo tất cả >= 2.5%
-                # Mode 2: Chỉ báo biến động mạnh ≥3%
-                if mode == 2 and abs(price_change) < 3.0:
-                    continue
+                # Mode 1: Báo tất cả (3-5% + ≥10%)
+                # Mode 2: Chỉ báo 3-5%
+                # Mode 3: Chỉ báo ≥10%
+                
+                if mode == 2:
+                    # Mode 2: Chỉ 3-5%, bỏ qua ≥10%
+                    if abs_change > MODERATE_MAX:
+                        continue
+                elif mode == 3:
+                    # Mode 3: Chỉ ≥10%
+                    if abs_change < EXTREME_THRESHOLD:
+                        continue
+                # Mode 1: Không filter, báo tất cả
 
                 tasks.append(
                     context.bot.send_message(
@@ -884,8 +909,9 @@ async def post_init(app):
         BotCommand("start", "Khởi động bot và xem hướng dẫn"),
         BotCommand("subscribe", "Bật thông báo pump/dump tự động"),
         BotCommand("unsubscribe", "Tắt thông báo tự động"),
-        BotCommand("mode1", "Báo tất cả (≥2.5%)"),
-        BotCommand("mode2", "Chỉ báo biến động mạnh (≥3%)"),
+        BotCommand("mode1", "Báo tất cả (3-5% + ≥10%)"),
+        BotCommand("mode2", "Chỉ báo trung bình (3-5%)"),
+        BotCommand("mode3", "Chỉ báo cực mạnh (≥10%)"),
         BotCommand("mute", "Tắt thông báo coin (ví dụ: /mute XION)"),
         BotCommand("unmute", "Bật lại thông báo coin"),
         BotCommand("mutelist", "Xem danh sách coin đã mute"),
@@ -925,6 +951,7 @@ def main():
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("mode1", mode1))
     app.add_handler(CommandHandler("mode2", mode2))
+    app.add_handler(CommandHandler("mode3", mode3))
     app.add_handler(CommandHandler("mute", mute_coin))
     app.add_handler(CommandHandler("unmute", unmute_coin))
     app.add_handler(CommandHandler("mutelist", mutelist))
