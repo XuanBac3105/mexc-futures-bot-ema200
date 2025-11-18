@@ -806,10 +806,10 @@ async def restart_bot(context):
     # Đợi 2 giây để gửi hết tin nhắn
     await asyncio.sleep(2)
     
-    # Restart bot bằng cách raise exception để Railway restart container
-    import sys
-    print("🔄 Exiting for restart...")
-    sys.exit(0)
+    # Restart bot bằng cách stop application
+    print("🔄 Stopping application for restart...")
+    await context.application.stop()
+    await context.application.shutdown()
 
 
 # ================== MAIN ==================
@@ -899,13 +899,23 @@ def main():
     print("🌐 WebSocket: Realtime price streaming")
     print("📅 Auto-restart khi có coin mới list")
     
-    # Chạy với graceful shutdown
-    try:
-        app.run_polling(drop_pending_updates=True)
-    except KeyboardInterrupt:
-        print("🛑 Bot đang tắt...")
-    except Exception as e:
-        print(f"❌ Bot error: {e}")
+    # Chạy với graceful shutdown và auto-restart
+    while True:
+        try:
+            print("🚀 Starting bot...")
+            app.run_polling(drop_pending_updates=True)
+            # Nếu run_polling kết thúc bình thường (restart) → restart lại
+            print("🔄 Bot stopped, restarting in 3 seconds...")
+            import time
+            time.sleep(3)
+        except KeyboardInterrupt:
+            print("🛑 Bot đang tắt...")
+            break
+        except Exception as e:
+            print(f"❌ Bot error: {e}")
+            print("🔄 Restarting in 5 seconds...")
+            import time
+            time.sleep(5)
 
 
 if __name__ == "__main__":
