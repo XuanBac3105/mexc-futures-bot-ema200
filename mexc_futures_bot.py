@@ -442,7 +442,6 @@ async def process_ticker(ticker_data, context):
             return
         
         now = datetime.now()
-        current_second = now.second
         
         # Lưu giá hiện tại
         LAST_PRICES[symbol] = {
@@ -483,44 +482,25 @@ async def process_ticker(ticker_data, context):
             BASE_PRICES[symbol] = current_price
             MAX_CHANGES[symbol] = {"max_pct": 0, "time": now}
         
-        # Kiểm tra ngưỡng và cooldown - CHỈ BÁO KHI ĐẠT MỐC MỚI
+        # Kiểm tra ngưỡng và alert ngay khi vượt
         should_alert = False
-        
-        if (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD) and current_second > 2:
-            # Kiểm tra xem đã báo ở mức này chưa
+        if (price_change >= PUMP_THRESHOLD or price_change <= DUMP_THRESHOLD):
             last_alert = ALERTED_SYMBOLS.get(symbol)
-            
-            # Tính cooldown dựa trên mức độ biến động
-            if abs_change >= EXTREME_THRESHOLD:
-                cooldown = 10  # 10s cho biến động cực mạnh (để theo dõi đà)
-            elif abs_change >= MODERATE_MAX:
-                cooldown = 7   # 7s cho biến động mạnh
-            else:
-                cooldown = 3   # 3s cho biến động trung bình
-            
-            # Chỉ alert nếu:
-            # 1. Chưa từng alert, HOẶC
-            # 2. Đã qua cooldown, HOẶC
-            # 3. % change tăng thêm >= 2% so với lần báo trước
-            if not last_alert:
+            last_max = MAX_CHANGES[symbol].get("last_alerted_pct", None)
+            # Báo ngay lần đầu vượt ngưỡng
+            if last_alert is None:
                 should_alert = True
             else:
-                time_since_last = (now - last_alert).total_seconds()
-                last_max = MAX_CHANGES[symbol].get("last_alerted_pct", 0)
-                
-                if time_since_last > cooldown:
-                    # Chỉ báo nếu % change tăng đáng kể so với lần trước
-                    if abs_change >= abs(last_max) + 2.0:  # Tăng thêm >= 2%
-                        should_alert = True
-            
+                # Nếu đã báo rồi, chỉ báo lại khi tăng thêm >=1.5%
+                if abs_change >= abs(last_max) + 1.5:
+                    should_alert = True
             if should_alert:
                 ALERTED_SYMBOLS[symbol] = now
-                MAX_CHANGES[symbol]["last_alerted_pct"] = price_change  # Lưu % đã báo
+                MAX_CHANGES[symbol]["last_alerted_pct"] = price_change
 
         if should_alert and SUBSCRIBERS:
             # Dùng BASE_PRICE và hiển thị % thay đổi TỔNG
             msg = fmt_alert(symbol, base_price, current_price, price_change)
-
             if price_change >= PUMP_THRESHOLD:
                 print(f"🚀 PUMP: {symbol} +{price_change:.2f}% (max: +{MAX_CHANGES[symbol]['max_pct']:.2f}%)")
             else:
