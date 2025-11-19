@@ -209,10 +209,14 @@ def admin_only(func):
         
         # Nếu không phải admin → từ chối
         if user_id not in ADMIN_IDS:
-            await update.message.reply_text(
+            msg = (
                 "⛔ Lệnh này chỉ dành cho admin.\n\n"
                 "Bạn có thể xem alert trong channel!"
             )
+            if getattr(update, "effective_message", None):
+                await update.effective_message.reply_text(msg)
+            else:
+                print("⛔ Lệnh admin bị từ chối (no message object)")
             return
         
         return await func(update, context)
@@ -221,21 +225,22 @@ def admin_only(func):
 
 
 # ================== COMMANDS ==================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     SUBSCRIBERS.add(chat_id)
     if chat_id not in ALERT_MODE:
         ALERT_MODE[chat_id] = 1  # Mặc định: tất cả
-    
+
     current_mode = ALERT_MODE.get(chat_id, 1)
     if current_mode == 1:
-        mode_text = "Tất cả (3-5% + ≥1%)"
+        mode_text = "Tất cả (3-5% + ≥10%)"
     elif current_mode == 2:
         mode_text = "Chỉ trung bình (3-5%)"
     else:
         mode_text = "Chỉ cực mạnh (≥10%)"
-    
-    await update.message.reply_text(
+
+    text = (
         "🤖 Bot Quét MEXC Futures !\n\n"
         "✅ Nhận giá REALTIME từ server\n"
         "✅ Báo NGAY LẬP TỨC khi ≥3%\n"
@@ -254,19 +259,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/coinlist – coin vừa list gần đây"
     )
 
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(text)
+    else:
+        print("Start command invoked but no message to reply to")
+
 
 @admin_only
 async def subscribe(update, context):
     SUBSCRIBERS.add(update.effective_chat.id)
     save_data()  # Lưu ngay sau khi subscribe
-    await update.message.reply_text("Đã bật báo!")
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text("Đã bật báo!")
+    else:
+        print("Subscribe executed (no message to reply)")
 
 
 @admin_only
 async def unsubscribe(update, context):
     SUBSCRIBERS.discard(update.effective_chat.id)
     save_data()  # Lưu sau khi unsubscribe
-    await update.message.reply_text("Đã tắt báo!")
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text("Đã tắt báo!")
+    else:
+        print("Unsubscribe executed (no message to reply)")
 
 
 @admin_only
@@ -274,12 +290,16 @@ async def mode1(update, context):
     chat_id = update.effective_chat.id
     ALERT_MODE[chat_id] = 1
     save_data()  # Lưu sau khi đổi mode
-    await update.message.reply_text(
+    text = (
         "✅ Đã chuyển sang Mode 1\n\n"
         "📊 Báo TẤT CẢ biến động:\n"
         "  🔸 Trung bình (3-5%)\n"
         "  🔥 Cực mạnh (≥10%)"
     )
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(text)
+    else:
+        print("Mode1 set (no message to reply)")
 
 
 @admin_only
@@ -287,11 +307,15 @@ async def mode2(update, context):
     chat_id = update.effective_chat.id
     ALERT_MODE[chat_id] = 2
     save_data()  # Lưu sau khi đổi mode
-    await update.message.reply_text(
+    text = (
         "✅ Đã chuyển sang Mode 2\n\n"
         "📊 CHỊ báo biến động trung bình:\n"
         "  🔸 3-5% (bỏ qua cực mạnh ≥10%)"
     )
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(text)
+    else:
+        print("Mode2 set (no message to reply)")
 
 
 @admin_only
@@ -299,11 +323,15 @@ async def mode3(update, context):
     chat_id = update.effective_chat.id
     ALERT_MODE[chat_id] = 3
     save_data()  # Lưu sau khi đổi mode
-    await update.message.reply_text(
+    text = (
         "✅ Đã chuyển sang Mode 3\n\n"
         "📊 CHỊ báo biến động CỰC MẠNH:\n"
         "  🔥 ≥10% (bỏ qua 3-5%)"
     )
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(text)
+    else:
+        print("Mode3 set (no message to reply)")
 
 
 @admin_only
@@ -311,10 +339,13 @@ async def mute_coin(update, context):
     chat_id = update.effective_chat.id
     
     if not context.args:
-        await update.message.reply_text(
-            "❌ Vui lòng nhập tên coin\n\n"
-            "Ví dụ: /mute XION hoặc /mute xion"
-        )
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text(
+                "❌ Vui lòng nhập tên coin\n\n"
+                "Ví dụ: /mute XION hoặc /mute xion"
+            )
+        else:
+            print("❌ Mute command thiếu args (không có message object)")
         return
     
     coin = context.args[0].upper().strip()  # Tự động chuyển thành chữ hoa
@@ -325,7 +356,13 @@ async def mute_coin(update, context):
     
     MUTED_COINS[chat_id].add(symbol)
     save_data()  # Lưu sau khi mute
-    await update.message.reply_text(f"🔇 Đã tắt thông báo cho `{coin}`", parse_mode="Markdown")
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(f"🔇 Đã tắt thông báo cho `{coin}`", parse_mode="Markdown")
+    else:
+        try:
+            await context.bot.send_message(chat_id, f"🔇 Đã tắt thông báo cho `{coin}`", parse_mode="Markdown")
+        except Exception:
+            print("🔇 Đã mute coin nhưng không thể gửi tin xác nhận")
 
 
 @admin_only
@@ -333,10 +370,13 @@ async def unmute_coin(update, context):
     chat_id = update.effective_chat.id
     
     if not context.args:
-        await update.message.reply_text(
-            "❌ Vui lòng nhập tên coin\n\n"
-            "Ví dụ: /unmute XION hoặc /unmute xion"
-        )
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text(
+                "❌ Vui lòng nhập tên coin\n\n"
+                "Ví dụ: /unmute XION hoặc /unmute xion"
+            )
+        else:
+            print("❌ Unmute command thiếu args (không có message object)")
         return
     
     coin = context.args[0].upper().strip()  # Tự động chuyển thành chữ hoa
@@ -345,9 +385,21 @@ async def unmute_coin(update, context):
     if chat_id in MUTED_COINS and symbol in MUTED_COINS[chat_id]:
         MUTED_COINS[chat_id].remove(symbol)
         save_data()  # Lưu sau khi unmute
-        await update.message.reply_text(f"🔔 Đã bật lại thông báo cho `{coin}`", parse_mode="Markdown")
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text(f"🔔 Đã bật lại thông báo cho `{coin}`", parse_mode="Markdown")
+        else:
+            try:
+                await context.bot.send_message(chat_id, f"🔔 Đã bật lại thông báo cho `{coin}`", parse_mode="Markdown")
+            except Exception:
+                print("🔔 Đã unmute coin nhưng không thể gửi tin xác nhận")
     else:
-        await update.message.reply_text(f"ℹ️ `{coin}` chưa bị mute", parse_mode="Markdown")
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text(f"ℹ️ `{coin}` chưa bị mute", parse_mode="Markdown")
+        else:
+            try:
+                await context.bot.send_message(chat_id, f"ℹ️ `{coin}` chưa bị mute", parse_mode="Markdown")
+            except Exception:
+                print("ℹ️ Trạng thái unmute không thể gửi (không có message)")
 
 
 @admin_only
@@ -355,7 +407,13 @@ async def mutelist(update, context):
     chat_id = update.effective_chat.id
     
     if chat_id not in MUTED_COINS or not MUTED_COINS[chat_id]:
-        await update.message.reply_text("ℹ️ Chưa có coin nào bị mute")
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text("ℹ️ Chưa có coin nào bị mute")
+        else:
+            try:
+                await context.bot.send_message(chat_id, "ℹ️ Chưa có coin nào bị mute")
+            except Exception:
+                print("ℹ️ Không có coin mute (không thể gửi message)")
         return
     
     coins = [sym.replace("_USDT", "") for sym in MUTED_COINS[chat_id]]
@@ -363,7 +421,13 @@ async def mutelist(update, context):
     msg += "\n".join([f"• `{coin}`" for coin in sorted(coins)])
     msg += f"\n\n_Tổng: {len(coins)} coin_"
     
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(msg, parse_mode="Markdown")
+    else:
+        try:
+            await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
+        except Exception:
+            print("ℹ️ Không thể gửi danh sách mute (no message object)")
 
 
 async def websocket_stream(context):
@@ -657,7 +721,13 @@ async def calc_movers(session, interval, symbols):
 
 async def timelist(update, context):
     """Lệnh xem lịch coin sẽ list trong 1 tuần - API Calendar"""
-    await update.message.reply_text("⏳ Đang lấy lịch listing...")
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text("⏳ Đang lấy lịch listing...")
+    else:
+        try:
+            await context.bot.send_message(update.effective_chat.id, "⏳ Đang lấy lịch listing...")
+        except Exception:
+            print("⏳ Timelist requested (no message object)")
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -705,23 +775,47 @@ async def timelist(update, context):
                         count += 1
                 
                 if count == 0:
-                    await update.message.reply_text("📅 Chưa có coin nào sắp list trong tuần tới")
+                    if getattr(update, "effective_message", None):
+                        await update.effective_message.reply_text("📅 Chưa có coin nào sắp list trong tuần tới")
+                    else:
+                        try:
+                            await context.bot.send_message(update.effective_chat.id, "📅 Chưa có coin nào sắp list trong tuần tới")
+                        except Exception:
+                            print("📅 Không thể gửi thông báo timelist")
                 else:
-                    await update.message.reply_text(msg, parse_mode="Markdown")
+                    if getattr(update, "effective_message", None):
+                        await update.effective_message.reply_text(msg, parse_mode="Markdown")
+                    else:
+                        try:
+                            await context.bot.send_message(update.effective_chat.id, msg, parse_mode="Markdown")
+                        except Exception:
+                            print("📅 Không thể gửi danh sách timelist")
     
     except Exception as e:
         print(f"❌ Lỗi scrape Futures listing: {e}")
-        await update.message.reply_text(
+        msg = (
             "❌ Không thể lấy dữ liệu từ MEXC\n\n"
             "Vui lòng xem trực tiếp tại:\n"
-            "🔗 https://www.mexc.co/vi-VN/announcements/new-listings",
-            parse_mode="Markdown"
+            "🔗 https://www.mexc.co/vi-VN/announcements/new-listings"
         )
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text(msg, parse_mode="Markdown")
+        else:
+            try:
+                await context.bot.send_message(update.effective_chat.id, msg, parse_mode="Markdown")
+            except Exception:
+                print("❌ Timelist: không thể gửi lỗi đến user")
 
 
 async def coinlist(update, context):
     """Lệnh xem các coin đã list trong 1 tuần - API Calendar"""
-    await update.message.reply_text("⏳ Đang lấy danh sách coin mới...")
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text("⏳ Đang lấy danh sách coin mới...")
+    else:
+        try:
+            await context.bot.send_message(update.effective_chat.id, "⏳ Đang lấy danh sách coin mới...")
+        except Exception:
+            print("⏳ Coinlist requested (no message object)")
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -769,18 +863,36 @@ async def coinlist(update, context):
                         count += 1
                 
                 if count == 0:
-                    await update.message.reply_text("📋 Không có coin nào list trong tuần qua")
+                    if getattr(update, "effective_message", None):
+                        await update.effective_message.reply_text("📋 Không có coin nào list trong tuần qua")
+                    else:
+                        try:
+                            await context.bot.send_message(update.effective_chat.id, "📋 Không có coin nào list trong tuần qua")
+                        except Exception:
+                            print("📋 Không thể gửi coinlist (no message)")
                 else:
-                    await update.message.reply_text(msg, parse_mode="Markdown")
+                    if getattr(update, "effective_message", None):
+                        await update.effective_message.reply_text(msg, parse_mode="Markdown")
+                    else:
+                        try:
+                            await context.bot.send_message(update.effective_chat.id, msg, parse_mode="Markdown")
+                        except Exception:
+                            print("📋 Không thể gửi danh sách coinlist")
     
     except Exception as e:
         print(f"❌ Lỗi scrape Futures listing: {e}")
-        await update.message.reply_text(
+        msg = (
             "❌ Không thể lấy dữ liệu từ MEXC\n\n"
             "Vui lòng xem trực tiếp tại:\n"
-            "🔗 https://www.mexc.co/vi-VN/announcements/new-listings",
-            parse_mode="Markdown"
+            "🔗 https://www.mexc.co/vi-VN/announcements/new-listings"
         )
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text(msg, parse_mode="Markdown")
+        else:
+            try:
+                await context.bot.send_message(update.effective_chat.id, msg, parse_mode="Markdown")
+            except Exception:
+                print("❌ Coinlist: không thể gửi lỗi đến user")
 
 
 # ================== JOBS ==================
