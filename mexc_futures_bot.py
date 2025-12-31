@@ -26,7 +26,7 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")  # ID của channel (ví dụ: -10012345678
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else set()  # Admin user IDs
 
 FUTURES_BASE = "https://contract.mexc.co"
-WEBSOCKET_URL = "wss://contract.mexc.com/edge"  # MEXC Futures WebSocket endpoint
+WEBSOCKET_URL = "wss://contract.mexc.co/edge"  # MEXC Futures WebSocket endpoint
 
 # Ngưỡng để báo động (%)
 PUMP_THRESHOLD = 3.0      # Tăng >= 3%
@@ -1100,14 +1100,21 @@ async def post_init(app):
     """Set bot commands menu"""
     from telegram import BotCommand
     
-    # Kiểm tra bot token hoạt động
-    try:
-        bot_info = await app.bot.get_me()
-        print(f"✅ Bot đã kết nối: @{bot_info.username} (ID: {bot_info.id})")
-    except Exception as e:
-        print(f"❌ LỖI KẾT NỐI BOT: {e}")
-        print("❌ Kiểm tra lại BOT_TOKEN trên Railway!")
-        return
+    # Kiểm tra bot token hoạt động (retry với delay dài hơn)
+    for conn_attempt in range(5):
+        try:
+            bot_info = await app.bot.get_me()
+            print(f"✅ Bot đã kết nối: @{bot_info.username} (ID: {bot_info.id})")
+            break
+        except Exception as e:
+            print(f"⚠️ Lỗi kết nối bot (attempt {conn_attempt+1}/5): {e}")
+            if conn_attempt < 4:
+                print(f"🔄 Thử lại sau 10 giây....")
+                await asyncio.sleep(10)
+            else:
+                print("❌ KHÔNG THỂ KẾT NỐI BOT sau 5 lần thử!")
+                print("❌ Kiểm tra lại BOT_TOKEN trên Railway!")
+                return
     
     commands = [
         BotCommand("start", "Khởi động bot và xem hướng dẫn"),
@@ -1142,10 +1149,10 @@ def main():
     from telegram.request import HTTPXRequest
     request = HTTPXRequest(
         connection_pool_size=8,
-        connect_timeout=30.0,  # Tăng từ mặc định 5s
-        read_timeout=30.0,     # Tăng từ mặc định 5s
-        write_timeout=30.0,
-        pool_timeout=30.0
+        connect_timeout=60.0,  # Tăng lên 60s
+        read_timeout=60.0,     # Tăng lên 60s
+        write_timeout=60.0,
+        pool_timeout=60.0
     )
     
     app = ApplicationBuilder().token(BOT_TOKEN).request(request).post_init(post_init).build()
