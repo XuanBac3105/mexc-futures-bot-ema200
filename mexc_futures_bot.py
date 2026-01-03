@@ -37,6 +37,20 @@ EXTREME_THRESHOLD = 10.0  # Ngưỡng cực mạnh >= 10%
 # Volume tối thiểu để tránh coin ít thanh khoản
 MIN_VOL_THRESHOLD = 100000
 
+# EMA 200 Detection
+EMA_PERIOD = 200
+EMA_PROXIMITY_THRESHOLD = 1.5  # ±1.5% từ EMA 200
+EMA_TIMEFRAMES = ["Min1", "Min5", "Min15", "Min30", "Min60", "Hour4"]
+EMA_TIMEFRAME_LABELS = {
+    "Min1": "M1",
+    "Min5": "M5", 
+    "Min15": "M15",
+    "Min30": "M30",
+    "Min60": "H1",
+    "Hour4": "H4"
+}
+
+
 SUBSCRIBERS = set()  # User IDs (cho private chat)
 ALERT_MODE = {}  # {chat_id: mode} - 1: tất cả, 2: chỉ biến động mạnh ≥3%
 MUTED_COINS = {}  # {chat_id: set(symbols)} - danh sách coin bị mute
@@ -53,6 +67,15 @@ LAST_SIGNIFICANT_CHANGE = {}  # {symbol: timestamp} - Lần cuối có biến đ
 # Scheduled restart tracking
 SCHEDULED_RESTARTS = set()  # Set of timestamps đã schedule restart
 
+# EMA 200 alert tracking
+EMA200_ALERTED = {}  # {symbol: {timeframe: timestamp}} - tránh spam alert EMA 200
+
+# Alert preferences - bật/tắt từng loại alert
+PUMPDUMP_ALERTS_ENABLED = {}  # {chat_id: bool} - True = bật pump/dump alerts
+EMA_ALERTS_ENABLED = {}  # {chat_id: bool} - True = bật EMA 200 alerts
+
+
+
 # File để lưu dữ liệu persist
 DATA_FILE = "bot_data.pkl"
 
@@ -64,7 +87,9 @@ def save_data():
         "subscribers": SUBSCRIBERS,
         "alert_mode": ALERT_MODE,
         "muted_coins": MUTED_COINS,
-        "known_symbols": KNOWN_SYMBOLS
+        "known_symbols": KNOWN_SYMBOLS,
+        "pumpdump_alerts_enabled": PUMPDUMP_ALERTS_ENABLED,
+        "ema_alerts_enabled": EMA_ALERTS_ENABLED
     }
     try:
         with open(DATA_FILE, "wb") as f:
@@ -76,7 +101,7 @@ def save_data():
 
 def load_data():
     """Tải dữ liệu từ file"""
-    global SUBSCRIBERS, ALERT_MODE, MUTED_COINS, KNOWN_SYMBOLS
+    global SUBSCRIBERS, ALERT_MODE, MUTED_COINS, KNOWN_SYMBOLS, PUMPDUMP_ALERTS_ENABLED, EMA_ALERTS_ENABLED
     
     if not os.path.exists(DATA_FILE):
         print("ℹ️ Chưa có dữ liệu lưu trữ")
@@ -90,6 +115,8 @@ def load_data():
         ALERT_MODE = data.get("alert_mode", {})
         MUTED_COINS = data.get("muted_coins", {})
         KNOWN_SYMBOLS = data.get("known_symbols", set())
+        PUMPDUMP_ALERTS_ENABLED = data.get("pumpdump_alerts_enabled", {})
+        EMA_ALERTS_ENABLED = data.get("ema_alerts_enabled", {})
         
         print(f"✅ Đã tải dữ liệu: {len(SUBSCRIBERS)} subscribers, {len(KNOWN_SYMBOLS)} coins")
     except Exception as e:
@@ -164,6 +191,113 @@ def fmt_top(title, data):
         icon = "🚀" if chg > 0 else "💥"
         txt.append(f"{i}. {icon} `{sym}` → {chg:+.2f}%")
     return "\n".join(txt)
+
+
+def calculate_ema(prices, period=200):
+    """
+    Tính EMA (Exponential Moving Average)
+    Formula: EMA = Price(t) × k + EMA(y) × (1 − k)
+    k = 2 / (N + 1)
+    """
+    if len(prices) < period:
+        return None
+    
+    k = 2 / (period + 1)
+    
+    # Bắt đầu với SMA cho period đầu tiên
+    ema = sum(prices[:period]) / period
+    
+    # Tính EMA cho các giá trị còn lại
+    for price in prices[period:]:
+        ema = price * k + ema * (1 - k)
+    
+    return ema
+
+
+async def get_ema200_data(session, symbol, timeframe="Min5"):
+    """
+    Lấy dữ liệu EMA 200 cho 1 symbol và 1 timeframe
+    Returns: dict với ema200, current_price, distance_pct hoặc None nếu lỗi
+    """
+    try:
+        # Lấy 250 candles để đảm bảo đủ data tính EMA 200
+        closes, _, _, _ = await get_kline(session, symbol, timeframe, limit=250)
+        
+        if len(closes) < EMA_PERIOD:
+            return None
+        
+        # Tính EMA 200
+        ema200 = calculate_ema(closes, EMA_PERIOD)
+        if ema200 is None:
+            return None
+        
+        # Lấy giá hiện tại (realtime)
+        current_price = await get_ticker(session, symbol)
+        if not current_price:
+            return None
+        
+        # Tính khoảng cách % từ giá hiện tại đến EMA 200
+        distance_pct = ((current_price - ema200) / ema200) * 100
+        
+        return {
+            "ema200": ema200,
+            "current_price": current_price,
+            "distance_pct": distance_pct
+        }
+    except Exception as e:
+        # print(f"Error getting EMA200 for {symbol} {timeframe}: {e}")
+        return None
+
+
+
+async def detect_ema200_proximity(session, symbols, threshold=EMA_PROXIMITY_THRESHOLD):
+    """
+    Phát hiện coins gần chạm EMA 200 trên đa khung thời gian
+    Returns: dict {timeframe: [(symbol, ema200, current_price, distance_pct), ...]}
+    """
+    import random
+    
+    results = {tf: [] for tf in EMA_TIMEFRAMES}
+    
+    # Scan từng timeframe
+    for timeframe in EMA_TIMEFRAMES:
+        print(f"🔍 Scanning EMA 200 for {timeframe}...")
+        
+        # Chia nhỏ thành batch để tránh rate limit
+        BATCH_SIZE = 30
+        
+        for i in range(0, len(symbols), BATCH_SIZE):
+            batch = symbols[i:i+BATCH_SIZE]
+            tasks = [get_ema200_data(session, sym, timeframe) for sym in batch]
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Lọc kết quả và kiểm tra proximity
+            for j, result in enumerate(batch_results):
+                if result and not isinstance(result, Exception):
+                    distance = result["distance_pct"]
+                    
+                    # Kiểm tra nếu trong vùng proximity threshold
+                    if abs(distance) <= threshold:
+                        symbol = batch[j]
+                        results[timeframe].append((
+                            symbol,
+                            result["ema200"],
+                            result["current_price"],
+                            distance
+                        ))
+            
+            # Delay giữa các batch
+            if i + BATCH_SIZE < len(symbols):
+                await asyncio.sleep(random.uniform(0.3, 0.6))
+        
+        # Delay giữa các timeframe
+        await asyncio.sleep(random.uniform(0.5, 1.0))
+    
+    # Sort mỗi timeframe theo khoảng cách gần nhất
+    for tf in results:
+        results[tf].sort(key=lambda x: abs(x[3]))
+    
+    return results
 
 
 def fmt_alert(symbol, old_price, new_price, change_pct):
@@ -252,12 +386,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mode1 – báo tất cả (3-5% + ≥10%)\n"
         "/mode2 – chỉ báo 3-5%\n"
         "/mode3 – chỉ báo ≥10%\n"
+        "/pumpdump_on – bật thông báo pump/dump\n"
+        "/pumpdump_off – tắt thông báo pump/dump\n"
+        "/ema_on – bật thông báo EMA 200\n"
+        "/ema_off – tắt thông báo EMA 200\n"
         "/mute COIN – tắt thông báo coin\n"
         "/unmute COIN – bật lại thông báo coin\n"
         "/mutelist – xem danh sách coin đã mute\n"
+        "/ema200 – xem coins gần chạm EMA 200\n"
         "/timelist – lịch coin sắp list\n"
         "/coinlist – coin vừa list gần đây"
     )
+
+
 
     if getattr(update, "effective_message", None):
         await update.effective_message.reply_text(text)
@@ -394,6 +535,160 @@ async def unmute_coin(update, context):
                 await context.bot.send_message(chat_id, f"ℹ️ `{coin}` chưa bị mute", parse_mode="Markdown")
             except Exception:
                 print("ℹ️ Trạng thái unmute không thể gửi (không có message)")
+
+
+async def ema200(update, context):
+    """Lệnh xem coins gần chạm EMA 200 trên đa khung thời gian"""
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text("⏳ Đang quét EMA 200 trên tất cả khung thời gian...")
+    else:
+        try:
+            await context.bot.send_message(update.effective_chat.id, "⏳ Đang quét EMA 200...")
+        except Exception:
+            print("⏳ EMA200 requested (no message object)")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Detect coins near EMA 200
+            results = await detect_ema200_proximity(session, ALL_SYMBOLS)
+            
+            # Format message
+            msg_parts = ["📊 *COINS GẦN CHẠM EMA 200*\n"]
+            total_count = 0
+            
+            for timeframe in EMA_TIMEFRAMES:
+                coins = results[timeframe]
+                if not coins:
+                    continue
+                
+                tf_label = EMA_TIMEFRAME_LABELS[timeframe]
+                msg_parts.append(f"\n🕐 *{tf_label}*")
+                
+                # Hiển thị tối đa 10 coins gần nhất mỗi timeframe
+                for symbol, ema200, current_price, distance in coins[:10]:
+                    coin_name = symbol.replace("_USDT", "")
+                    
+                    # Icon dựa trên vị trí
+                    if abs(distance) <= 0.3:
+                        icon = "🎯"  # Đang chạm
+                        status = "CHẠM"
+                    elif distance > 0:
+                        icon = "🟢"  # Trên EMA
+                        status = "trên"
+                    else:
+                        icon = "🔴"  # Dưới EMA
+                        status = "dưới"
+                    
+                    link = f"https://www.mexc.co/futures/{symbol}"
+                    msg_parts.append(
+                        f"{icon} [{coin_name}]({link}) "
+                        f"`{distance:+.2f}%` {status} EMA200"
+                    )
+                    total_count += 1
+                
+                if len(coins) > 10:
+                    msg_parts.append(f"_...và {len(coins) - 10} coin khác_")
+            
+            if total_count == 0:
+                msg = "ℹ️ Không có coin nào gần EMA 200 trong vùng ±1.5%"
+            else:
+                msg_parts.append(f"\n_Tổng: {total_count} coins (hiển thị top 10/timeframe)_")
+                msg = "\n".join(msg_parts)
+            
+            if getattr(update, "effective_message", None):
+                await update.effective_message.reply_text(
+                    msg, 
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
+            else:
+                try:
+                    await context.bot.send_message(
+                        update.effective_chat.id, 
+                        msg,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                except Exception:
+                    print("📊 Không thể gửi kết quả EMA200")
+    
+    except Exception as e:
+        print(f"❌ Lỗi EMA200 scan: {e}")
+        error_msg = "❌ Có lỗi khi quét EMA 200. Vui lòng thử lại sau."
+        if getattr(update, "effective_message", None):
+            await update.effective_message.reply_text(error_msg)
+        else:
+            try:
+                await context.bot.send_message(update.effective_chat.id, error_msg)
+            except Exception:
+                print("❌ EMA200: không thể gửi lỗi đến user")
+
+
+async def pumpdump_on(update, context):
+    """Bật thông báo pump/dump"""
+    chat_id = update.effective_chat.id
+    PUMPDUMP_ALERTS_ENABLED[chat_id] = True
+    save_data()
+    
+    msg = "✅ Đã BẬT thông báo Pump/Dump"
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(msg)
+    else:
+        try:
+            await context.bot.send_message(chat_id, msg)
+        except Exception:
+            print("✅ Pump/Dump alerts enabled")
+
+
+async def pumpdump_off(update, context):
+    """Tắt thông báo pump/dump"""
+    chat_id = update.effective_chat.id
+    PUMPDUMP_ALERTS_ENABLED[chat_id] = False
+    save_data()
+    
+    msg = "🔕 Đã TẮT thông báo Pump/Dump"
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(msg)
+    else:
+        try:
+            await context.bot.send_message(chat_id, msg)
+        except Exception:
+            print("🔕 Pump/Dump alerts disabled")
+
+
+async def ema_on(update, context):
+    """Bật thông báo EMA 200"""
+    chat_id = update.effective_chat.id
+    EMA_ALERTS_ENABLED[chat_id] = True
+    save_data()
+    
+    msg = "✅ Đã BẬT thông báo EMA 200"
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(msg)
+    else:
+        try:
+            await context.bot.send_message(chat_id, msg)
+        except Exception:
+            print("✅ EMA 200 alerts enabled")
+
+
+async def ema_off(update, context):
+    """Tắt thông báo EMA 200"""
+    chat_id = update.effective_chat.id
+    EMA_ALERTS_ENABLED[chat_id] = False
+    save_data()
+    
+    msg = "🔕 Đã TẮT thông báo EMA 200"
+    if getattr(update, "effective_message", None):
+        await update.effective_message.reply_text(msg)
+    else:
+        try:
+            await context.bot.send_message(chat_id, msg)
+        except Exception:
+            print("🔕 EMA 200 alerts disabled")
+
+
+
 
 
 async def mutelist(update, context):
@@ -581,12 +876,18 @@ async def process_ticker(ticker_data, context):
             
             # Gửi cho subscribers cá nhân (nếu có)
             for chat in SUBSCRIBERS:
+                # Kiểm tra xem user có bật pump/dump alerts không
+                pumpdump_enabled = PUMPDUMP_ALERTS_ENABLED.get(chat, True)  # Mặc định: bật
+                if not pumpdump_enabled:
+                    continue
+                
                 # Kiểm tra coin có bị mute không
                 if chat in MUTED_COINS and symbol in MUTED_COINS[chat]:
                     continue
                 
                 mode = ALERT_MODE.get(chat, 1)  # Mặc định mode 1
                 abs_change = abs(price_change)
+
 
                 # Mode 1: Báo tất cả (3-5% + ≥10%)
                 # Mode 2: Chỉ báo 3-5%
@@ -975,6 +1276,122 @@ async def job_new_listing(context):
             coin = sym.replace("_USDT", "")
             alerts.append(f"🆕 *COIN MỚI LIST:* `{coin}`")
             print(f"🆕 NEW LISTING: {sym}")
+
+
+async def job_ema200_scan(context):
+    """Job quét EMA 200 mỗi 5 phút và gửi alert khi có coin mới vào vùng proximity"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Detect coins near EMA 200
+            results = await detect_ema200_proximity(session, ALL_SYMBOLS)
+            
+            # Track coins đã alert để tránh spam
+            global EMA200_ALERTED
+            now = datetime.now()
+            
+            new_alerts = []  # [(timeframe, symbol, ema200, current_price, distance), ...]
+            
+            for timeframe in EMA_TIMEFRAMES:
+                coins = results[timeframe]
+                
+                for symbol, ema200, current_price, distance in coins:
+                    # Kiểm tra xem đã alert coin này ở timeframe này chưa
+                    if symbol not in EMA200_ALERTED:
+                        EMA200_ALERTED[symbol] = {}
+                    
+                    last_alert = EMA200_ALERTED[symbol].get(timeframe)
+                    
+                    # Chỉ alert nếu:
+                    # 1. Chưa từng alert coin này ở timeframe này, HOẶC
+                    # 2. Đã qua 30 phút kể từ lần alert cuối
+                    should_alert = False
+                    if last_alert is None:
+                        should_alert = True
+                    else:
+                        time_since_alert = (now - last_alert).total_seconds()
+                        if time_since_alert > 1800:  # 30 phút
+                            should_alert = True
+                    
+                    if should_alert:
+                        new_alerts.append((timeframe, symbol, ema200, current_price, distance))
+                        EMA200_ALERTED[symbol][timeframe] = now
+            
+            # Nếu có alert mới, gửi thông báo
+            if new_alerts and (CHANNEL_ID or SUBSCRIBERS):
+                # Group alerts theo timeframe
+                alerts_by_tf = {}
+                for tf, symbol, ema200, current_price, distance in new_alerts:
+                    if tf not in alerts_by_tf:
+                        alerts_by_tf[tf] = []
+                    alerts_by_tf[tf].append((symbol, ema200, current_price, distance))
+                
+                # Format message
+                msg_parts = ["🎯 *EMA 200 ALERT*\n"]
+                
+                for timeframe in EMA_TIMEFRAMES:
+                    if timeframe not in alerts_by_tf:
+                        continue
+                    
+                    tf_label = EMA_TIMEFRAME_LABELS[timeframe]
+                    msg_parts.append(f"\n🕐 *{tf_label}*")
+                    
+                    for symbol, ema200, current_price, distance in alerts_by_tf[timeframe]:
+                        coin_name = symbol.replace("_USDT", "")
+                        
+                        # Icon và status
+                        if abs(distance) <= 0.3:
+                            icon = "🎯"
+                            status = "CHẠM"
+                        elif distance > 0:
+                            icon = "🟢"
+                            status = "trên"
+                        else:
+                            icon = "🔴"
+                            status = "dưới"
+                        
+                        link = f"https://www.mexc.co/futures/{symbol}"
+                        msg_parts.append(
+                            f"{icon} [{coin_name}]({link}) {status} EMA200 `{distance:+.2f}%`"
+                        )
+                
+                msg = "\n".join(msg_parts)
+                
+                # Gửi alert
+                tasks = []
+                
+                if CHANNEL_ID:
+                    tasks.append(
+                        context.bot.send_message(
+                            CHANNEL_ID,
+                            msg,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                    )
+                
+                for chat in SUBSCRIBERS:
+                    # Kiểm tra xem user có bật EMA alerts không
+                    ema_enabled = EMA_ALERTS_ENABLED.get(chat, True)  # Mặc định: bật
+                    if not ema_enabled:
+                        continue
+                    
+                    tasks.append(
+                        context.bot.send_message(
+                            chat,
+                            msg,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                    )
+
+                
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    print(f"✅ Sent EMA 200 alerts for {len(new_alerts)} coins")
+    
+    except Exception as e:
+        print(f"❌ Error in job_ema200_scan: {e}")
+
         
         save_data()  # Lưu danh sách coin mới
         
@@ -1126,9 +1543,11 @@ async def post_init(app):
         BotCommand("mute", "Tắt thông báo coin (ví dụ: /mute XION)"),
         BotCommand("unmute", "Bật lại thông báo coin"),
         BotCommand("mutelist", "Xem danh sách coin đã mute"),
+        BotCommand("ema200", "Xem coins gần chạm EMA 200"),
         BotCommand("timelist", "Lịch coin sắp list trong 1 tuần"),
         BotCommand("coinlist", "Coin đã list trong 1 tuần qua"),
     ]
+
     
     # Retry logic cho set_my_commands (tránh timeout khi khởi động)
     for attempt in range(3):
@@ -1163,11 +1582,18 @@ def main():
     app.add_handler(CommandHandler("mode1", mode1))
     app.add_handler(CommandHandler("mode2", mode2))
     app.add_handler(CommandHandler("mode3", mode3))
+    app.add_handler(CommandHandler("pumpdump_on", pumpdump_on))
+    app.add_handler(CommandHandler("pumpdump_off", pumpdump_off))
+    app.add_handler(CommandHandler("ema_on", ema_on))
+    app.add_handler(CommandHandler("ema_off", ema_off))
     app.add_handler(CommandHandler("mute", mute_coin))
     app.add_handler(CommandHandler("unmute", unmute_coin))
+
     app.add_handler(CommandHandler("mutelist", mutelist))
+    app.add_handler(CommandHandler("ema200", ema200))
     app.add_handler(CommandHandler("timelist", timelist))
     app.add_handler(CommandHandler("coinlist", coinlist))
+
 
     jq = app.job_queue
     
@@ -1194,8 +1620,12 @@ def main():
     # Kiểm tra coin mới mỗi 5 phút
     jq.run_repeating(job_new_listing, 300, first=30)
     
+    # Quét EMA 200 mỗi 5 phút
+    jq.run_repeating(job_ema200_scan, 300, first=90)
+    
     # Schedule restart cho coin mới list (chạy mỗi 30 phút để cập nhật lịch)
     jq.run_repeating(job_schedule_restarts, 1800, first=60)
+
 
     print("🔥 Bot quét MEXC Futures...")
     print(f"📊 Ngưỡng pump: >= {PUMP_THRESHOLD}%")
