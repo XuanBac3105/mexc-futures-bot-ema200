@@ -13,7 +13,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import pytz
-from collections import defaultdict
+from collections import defaultdict, deque
 import pickle
 import os.path
 
@@ -70,9 +70,15 @@ SCHEDULED_RESTARTS = set()  # Set of timestamps đã schedule restart
 # EMA 200 alert tracking
 EMA200_ALERTED = {}  # {symbol: {timeframe: timestamp}} - tránh spam alert EMA 200
 
+# WebSocket-based EMA - candle buffers (NEW)
+CANDLE_BUFFERS = {}  # {symbol: {timeframe: deque([close_prices])}}
+EMA_VALUES = {}  # {symbol: {timeframe: float}} - cached EMA 200
+LAST_CANDLE_TIME = {}  # {symbol: {timeframe: int}} - track candle timestamp
+
 # Alert preferences - bật/tắt từng loại alert
 PUMPDUMP_ALERTS_ENABLED = {}  # {chat_id: bool} - True = bật pump/dump alerts
 EMA_ALERTS_ENABLED = {}  # {chat_id: bool} - True = bật EMA 200 alerts
+
 
 
 
@@ -320,6 +326,101 @@ async def detect_ema200_proximity(session, symbols, threshold=EMA_PROXIMITY_THRE
         results[tf].sort(key=lambda x: abs(x[3]))
     
     return results
+
+
+# ==================== WEBSOCKET EMA FUNCTIONS ====================
+
+def update_candle_buffer(symbol, timeframe, candle_close, candle_time):
+    """Update candle buffer và recalculate EMA khi có candle mới"""
+    global CANDLE_BUFFERS, EMA_VALUES, LAST_CANDLE_TIME
+    
+    if symbol not in CANDLE_BUFFERS:
+        CANDLE_BUFFERS[symbol] = {}
+        EMA_VALUES[symbol] = {}
+        LAST_CANDLE_TIME[symbol] = {}
+    
+    if timeframe not in CANDLE_BUFFERS[symbol]:
+        CANDLE_BUFFERS[symbol][timeframe] = deque(maxlen=EMA_PERIOD)
+        LAST_CANDLE_TIME[symbol][timeframe] = 0
+    
+    if candle_time > LAST_CANDLE_TIME[symbol][timeframe]:
+        buffer = CANDLE_BUFFERS[symbol][timeframe]
+        buffer.append(float(candle_close))
+        LAST_CANDLE_TIME[symbol][timeframe] = candle_time
+        
+        if len(buffer) >= EMA_PERIOD:
+            ema200 = calculate_ema(list(buffer), EMA_PERIOD)
+            if ema200:
+                EMA_VALUES[symbol][timeframe] = ema200
+
+
+async def check_ema_proximity_realtime(symbol, current_price, context):
+    """Check realtime nếu giá gần chạm EMA 200"""
+    if symbol not in EMA_VALUES:
+        return
+    
+    alerts, now = [], datetime.now()
+    
+    for timeframe, ema200 in EMA_VALUES[symbol].items():
+        distance_pct = ((current_price - ema200) / ema200) * 100
+        
+        if abs(distance_pct) <= EMA_PROXIMITY_THRESHOLD:
+            if symbol not in EMA200_ALERTED:
+                EMA200_ALERTED[symbol] = {}
+            
+            last_alert = EMA200_ALERTED[symbol].get(timeframe)
+            if last_alert is None or (now - last_alert).total_seconds() > 1800:
+                alerts.append((timeframe, ema200, distance_pct))
+                EMA200_ALERTED[symbol][timeframe] = now
+    
+    if alerts and (CHANNEL_ID or SUBSCRIBERS):
+        msg_parts = ["🎯 *EMA 200 ALERT*\\n"]
+        for tf, ema, dist in alerts:
+            tf_label = EMA_TIMEFRAME_LABELS.get(tf, tf)
+            coin = symbol.replace("_USDT", "")
+            icon = "🎯" if abs(dist) <= 0.3 else ("🟢" if dist > 0 else "🔴")
+            status = "CHẠM" if abs(dist) <= 0.3 else ("trên" if dist > 0 else "dưới")
+            link = f"https://www.mexc.co/futures/{symbol}"
+            msg_parts.append(f"\\n🕐 *{tf_label}*")
+            msg_parts.append(f"{icon} [{coin}]({link}) {status} EMA200 `{dist:+.2f}%`")
+        
+        msg, tasks = "\\n".join(msg_parts), []
+        if CHANNEL_ID:
+            tasks.append(context.bot.send_message(CHANNEL_ID, msg, parse_mode="Markdown", disable_web_page_preview=True))
+        for chat in SUBSCRIBERS:
+            if EMA_ALERTS_ENABLED.get(chat, True):
+                tasks.append(context.bot.send_message(chat, msg, parse_mode="Markdown", disable_web_page_preview=True))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def init_candle_buffers(session):
+    """Load initial 200 candles"""
+    print("📊 Loading EMA buffers...")
+    loaded = 0
+    for tf in EMA_TIMEFRAMES:
+        print(f"  📈 {EMA_TIMEFRAME_LABELS.get(tf, tf)}...")
+        for i in range(0, len(ALL_SYMBOLS), 50):
+            for sym in ALL_SYMBOLS[i:i+50]:
+                try:
+                    closes, _, _, _ = await get_kline(session, sym, tf, limit=EMA_PERIOD)
+                    if closes and len(closes) >= EMA_PERIOD:
+                        if sym not in CANDLE_BUFFERS:
+                            CANDLE_BUFFERS[sym] = {}
+                            EMA_VALUES[sym] = {}
+                            LAST_CANDLE_TIME[sym] = {}
+                        CANDLE_BUFFERS[sym][tf] = deque(closes, maxlen=EMA_PERIOD)
+                        LAST_CANDLE_TIME[sym][tf] = 0
+                        ema = calculate_ema(list(CANDLE_BUFFERS[sym][tf]), EMA_PERIOD)
+                        if ema:
+                            EMA_VALUES[sym][tf] = ema
+                            loaded += 1
+                except:
+                    pass
+            await asyncio.sleep(0.05)
+    print(f"✅ Loaded {loaded} EMA buffers")
+
+
 
 
 def fmt_alert(symbol, old_price, new_price, change_pct):
@@ -769,6 +870,21 @@ async def websocket_stream(context):
                 
                 print(f"✅ Đã subscribe {len(ALL_SYMBOLS)} coin qua WebSocket")
                 
+                # Subscribe kline cho EMA (chỉ coins có buffer)
+                if CANDLE_BUFFERS:
+                    print(f"📊 Subscribing kline streams...")
+                    kline_count = 0
+                    for symbol in CANDLE_BUFFERS.keys():
+                        for timeframe in EMA_TIMEFRAMES:
+                            await ws.send(json.dumps({
+                                "method": "sub.kline",
+                                "param": {"symbol": symbol, "interval": timeframe}
+                            }))
+                            kline_count += 1
+                            await asyncio.sleep(0.005)
+                    print(f"✅ Subscribed {kline_count} kline streams")
+
+                
                 # Reset reconnect delay sau khi connect thành công
                 reconnect_delay = 5
                 
@@ -786,6 +902,18 @@ async def websocket_stream(context):
                         if "channel" in data and data.get("channel") == "push.ticker":
                             if "data" in data:
                                 await process_ticker(data["data"], context)
+                        
+                        # Xử lý kline data - UPDATE BUFFER
+                        elif "channel" in data and data.get("channel") == "push.kline":
+                            if "data" in data:
+                                kline = data["data"]
+                                sym = kline.get("symbol")
+                                interval = kline.get("interval")
+                                close = kline.get("c")
+                                timestamp = kline.get("t")
+                                if sym and interval and close and timestamp:
+                                    update_candle_buffer(sym, interval, close, timestamp)
+
                             
                     except json.JSONDecodeError:
                         continue
@@ -823,10 +951,14 @@ async def process_ticker(ticker_data, context):
             "time": now
         }
         
+        # REALTIME EMA CHECK
+        await check_ema_proximity_realtime(symbol, current_price, context)
+        
         # Thiết lập base price nếu chưa có
         if symbol not in BASE_PRICES:
             BASE_PRICES[symbol] = current_price
             return
+
         
         # Tính % thay đổi từ BASE_PRICE (dynamic - chỉ reset sau alert)
         base_price = BASE_PRICES[symbol]
