@@ -155,16 +155,22 @@ async def get_kline(session, symbol, interval="Min5", limit=10):
     url = f"{FUTURES_BASE}/api/v1/contract/kline/{symbol}"
     try:
         data = await fetch_json(session, url, {"interval": interval})
+        
+        # Kiểm tra data có đầy đủ fields không
+        if not data or "close" not in data or "high" not in data or "low" not in data or "vol" not in data:
+            return None, None, None, None
+        
         closes = [float(x) for x in data["close"][-limit:]]
         highs = [float(x) for x in data["high"][-limit:]]
         lows = [float(x) for x in data["low"][-limit:]]
         vols = [float(v) for v in data["vol"][-limit:]]
         return closes, highs, lows, vols
     except Exception as e:
-        # Bỏ qua lỗi 404 (coin đã delist)
-        if "404" not in str(e):
+        # Bỏ qua lỗi 404 (coin đã delist) và lỗi data format
+        if "404" not in str(e) and "close" not in str(e):
             print(f"⚠️ Error getting kline for {symbol}: {e}")
         return None, None, None, None
+
 
 
 
