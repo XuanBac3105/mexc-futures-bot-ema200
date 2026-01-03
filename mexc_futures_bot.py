@@ -153,19 +153,33 @@ async def fetch_json(session, url, params=None, retry=3):
 
 async def get_kline(session, symbol, interval="Min5", limit=10):
     url = f"{FUTURES_BASE}/api/v1/contract/kline/{symbol}"
-    data = await fetch_json(session, url, {"interval": interval})
-    closes = [float(x) for x in data["close"][-limit:]]
-    highs = [float(x) for x in data["high"][-limit:]]
-    lows = [float(x) for x in data["low"][-limit:]]
-    vols = [float(v) for v in data["vol"][-limit:]]
-    return closes, highs, lows, vols
+    try:
+        data = await fetch_json(session, url, {"interval": interval})
+        closes = [float(x) for x in data["close"][-limit:]]
+        highs = [float(x) for x in data["high"][-limit:]]
+        lows = [float(x) for x in data["low"][-limit:]]
+        vols = [float(v) for v in data["vol"][-limit:]]
+        return closes, highs, lows, vols
+    except Exception as e:
+        # Bỏ qua lỗi 404 (coin đã delist)
+        if "404" not in str(e):
+            print(f"⚠️ Error getting kline for {symbol}: {e}")
+        return None, None, None, None
+
 
 
 async def get_ticker(session, symbol):
     """Lấy giá ticker hiện tại (realtime)"""
     url = f"{FUTURES_BASE}/api/v1/contract/ticker/{symbol}"
-    data = await fetch_json(session, url)
-    return float(data["lastPrice"]) if data and "lastPrice" in data else None
+    try:
+        data = await fetch_json(session, url)
+        return float(data["lastPrice"]) if data and "lastPrice" in data else None
+    except Exception as e:
+        # Bỏ qua lỗi 404 (coin đã delist) - không in ra để tránh spam log
+        if "404" not in str(e):
+            print(f"⚠️ Error getting ticker for {symbol}: {e}")
+        return None
+
 
 
 async def get_all_contracts(session):
@@ -223,8 +237,10 @@ async def get_ema200_data(session, symbol, timeframe="Min5"):
         # Lấy 250 candles để đảm bảo đủ data tính EMA 200
         closes, _, _, _ = await get_kline(session, symbol, timeframe, limit=250)
         
-        if len(closes) < EMA_PERIOD:
+        # Kiểm tra nếu get_kline trả về None (coin đã delist)
+        if closes is None or len(closes) < EMA_PERIOD:
             return None
+
         
         # Tính EMA 200
         ema200 = calculate_ema(closes, EMA_PERIOD)

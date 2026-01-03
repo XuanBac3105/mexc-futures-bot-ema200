@@ -1,223 +1,163 @@
-# 🤖 MEXC Futures Alert Bot
+# MEXC Futures Bot - EMA 200 Edition
 
-Bot Telegram tự động quét **TẤT CẢ coin** trên MEXC Futures và gửi thông báo ngay lập tức khi phát hiện biến động giá mạnh.
+Bot Telegram tự động theo dõi và cảnh báo biến động giá trên MEXC Futures với tính năng phát hiện EMA 200.
 
-![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-blue?logo=telegram)
-![Python](https://img.shields.io/badge/Python-3.10-green?logo=python)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+## ✨ Tính năng chính
 
----
+### 🚀 Pump/Dump Detection
+- Theo dõi **realtime** giá tất cả coins USDT Futures
+- Cảnh báo **ngay lập tức** khi biến động ≥3%
+- 3 modes: Tất cả (3-10%+), Trung bình (3-5%), Cực mạnh (≥10%)
+- Dynamic base price - không bỏ lỡ pump/dump
 
-## ✨ Tính năng
+### 📊 EMA 200 Detection (NEW!)
+- Phát hiện coins gần chạm EMA 200 trên **6 khung thời gian**: M1, M5, M15, M30, H1, H4
+- Lệnh `/ema200` để xem manual
+- **Auto scan mỗi 5 phút** và gửi alert tự động
+- Proximity threshold: ±1.5% từ EMA 200
 
-- 🔍 **Quét tự động** tất cả USDT Futures trên MEXC (hàng trăm coin)
-- ⚡ **Alert Pump/Dump** ngay lập tức khi coin tăng/giảm >= 5% trong 5 phút
-- 🆕 **Phát hiện coin mới list**
-- 📊 **Lọc volume** - Chỉ báo coin có thanh khoản tốt (>100k USDT)
-- 💬 **Giao diện đẹp** với emoji và format rõ ràng
+### 🔔 Alert Toggle Controls (NEW!)
+- Bật/tắt riêng từng loại thông báo
+- `/pumpdump_on` / `/pumpdump_off` - Điều khiển thông báo pump/dump
+- `/ema_on` / `/ema_off` - Điều khiển thông báo EMA 200
+- Tránh spam khi chỉ muốn nhận 1 loại alert
 
-## 📊 Format Thông Báo
+### 🎯 Các tính năng khác
+- Mute/unmute coin cụ thể
+- Lịch coin sắp list trong tuần
+- Coin vừa list gần đây
+- Auto-restart khi có coin mới
 
-```
-┌🚀🚀🚀 SOL ⚡ +8.45% 🟢
-└ 145.50 → 157.79
+## 📋 Yêu cầu
 
-┌💥💥💥 DOGE ⚡ -6.23% 🔴
-└ 0.0875 → 0.0820
-```
+- Python 3.8+
+- Telegram Bot Token
+- Channel/Group ID để gửi alert
 
----
+## 🚀 Cài đặt
 
-## 🚀 Deploy lên Cloud (Khuyến nghị - Chạy 24/7 miễn phí)
-
-### Railway.app - Tốt nhất! ⭐⭐⭐⭐⭐
-
-1. **Push code lên GitHub:**
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   git remote add origin https://github.com/YOUR_USERNAME/mexc-futures-bot.git
-   git push -u origin main
-   ```
-
-2. **Deploy lên Railway:**
-   - Vào: https://railway.app
-   - Login with GitHub
-   - New Project → Deploy from GitHub repo
-   - Chọn repo `mexc-futures-bot`
-   - Click Deploy!
-
-3. **(Tùy chọn) Ẩn BOT_TOKEN:**
-   - Variables → Add Variable
-   - Key: `BOT_TOKEN`
-   - Value: `YOUR_TELEGRAM_BOT_TOKEN`
-
-4. **Test bot:**
-   - Mở Telegram, tìm bot của bạn
-   - `/start` → `/subscribe`
-   - Done! ✅
-
-### So sánh các platform:
-
-| Platform | Free | Sleep? | Setup | Rating |
-|----------|------|--------|-------|--------|
-| [Railway](https://railway.app) | $5/tháng | ❌ | 5 phút | ⭐⭐⭐⭐⭐ |
-| [Render](https://render.com) | Free | ✅ 15p | 10 phút | ⭐⭐⭐ |
-| [Fly.io](https://fly.io) | Free | ❌ | 15 phút | ⭐⭐⭐⭐ |
-
----
-
-## 🖥️ Chạy trên máy local
-
-### Yêu cầu:
-- Python 3.10+
-- VPN (nếu ở Việt Nam)
-
-### Cài đặt:
-
+1. Clone repository:
 ```bash
-# Clone repo
-git clone https://github.com/YOUR_USERNAME/mexc-futures-bot.git
-cd mexc-futures-bot
+git clone https://github.com/XuanBac3105/mexc-futures-bot-ema200.git
+cd mexc-futures-bot-ema200
+```
 
-# Install dependencies
+2. Cài đặt dependencies:
+```bash
 pip install -r requirements.txt
+```
 
-# Set BOT_TOKEN (Windows)
-set BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+3. Tạo file `.env` từ template:
+```bash
+cp .env.example .env
+```
 
-# Hoặc sửa trực tiếp trong mexc_futures_bot.py
+4. Cấu hình file `.env`:
+```env
+BOT_TOKEN=your_telegram_bot_token
+CHANNEL_ID=your_channel_id
+ADMIN_IDS=your_user_id
+```
 
-# Run bot
+5. Chạy bot:
+```bash
 python mexc_futures_bot.py
 ```
 
-⚠️ **Lưu ý:** Cần VPN và máy bật 24/7
+## 📱 Các lệnh Telegram
 
----
+### Quản lý thông báo
+- `/start` - Khởi động bot và xem hướng dẫn
+- `/subscribe` - Bật thông báo tự động
+- `/unsubscribe` - Tắt thông báo tự động
 
-## 🔧 Cấu hình
+### Chế độ pump/dump
+- `/mode1` - Báo tất cả (3-5% + ≥10%)
+- `/mode2` - Chỉ báo trung bình (3-5%)
+- `/mode3` - Chỉ báo cực mạnh (≥10%)
 
-Chỉnh sửa trong `mexc_futures_bot.py`:
+### Toggle alerts
+- `/pumpdump_on` - Bật thông báo pump/dump
+- `/pumpdump_off` - Tắt thông báo pump/dump
+- `/ema_on` - Bật thông báo EMA 200
+- `/ema_off` - Tắt thông báo EMA 200
+
+### Mute coins
+- `/mute COIN` - Tắt thông báo coin (ví dụ: `/mute BTC`)
+- `/unmute COIN` - Bật lại thông báo coin
+- `/mutelist` - Xem danh sách coin đã mute
+
+### EMA 200
+- `/ema200` - Xem coins gần chạm EMA 200 trên tất cả timeframes
+
+### Listing
+- `/timelist` - Lịch coin sắp list trong 1 tuần
+- `/coinlist` - Coin đã list trong 1 tuần qua
+
+## 🎨 Format Alert
+
+### Pump/Dump Alert
+```
+⚠️BIẾN ĐỘNG CỰC MẠNH⚠️
+┌🚀🚀🚀 BTC ⚡ +12.50% 🟢
+└ 45000 → 50625
+```
+
+### EMA 200 Alert
+```
+🎯 EMA 200 ALERT
+
+🕐 M1
+🟢 BTC trên EMA200 +0.8%
+🔴 ETH dưới EMA200 -1.2%
+
+🕐 M5
+🎯 SOL CHẠM EMA200 +0.1%
+```
+
+## ⚙️ Cấu hình
+
+File `mexc_futures_bot.py` có các constants có thể điều chỉnh:
 
 ```python
-# Ngưỡng báo động
-PUMP_THRESHOLD = 5.0    # Báo khi tăng >= 5%
-DUMP_THRESHOLD = -5.0   # Báo khi giảm >= 5%
+# Pump/Dump thresholds
+PUMP_THRESHOLD = 3.0      # Tăng >= 3%
+DUMP_THRESHOLD = -3.0     # Giảm >= 3%
+EXTREME_THRESHOLD = 10.0  # Ngưỡng cực mạnh >= 10%
 
-# Volume tối thiểu
-MIN_VOL_THRESHOLD = 100000  # Chỉ báo coin volume >= 100k
+# EMA 200 settings
+EMA_PERIOD = 200
+EMA_PROXIMITY_THRESHOLD = 1.5  # ±1.5% từ EMA 200
+
+# Volume filter
+MIN_VOL_THRESHOLD = 100000  # Volume tối thiểu
 ```
 
----
+## 🐳 Deploy với Docker
 
-## 💬 Lệnh Telegram
-
-- `/start` - Bắt đầu & xem hướng dẫn
-- `/subscribe` - Bật báo động tự động
-- `/unsubscribe` - Tắt báo động
-- `/top10` - Xem top 10 gainers/losers
-
----
-
-## 📱 Tạo Telegram Bot
-
-1. Telegram → Tìm **@BotFather**
-2. Gửi `/newbot`
-3. Đặt tên & username
-4. Copy TOKEN
-5. Paste vào code hoặc environment variable
-
----
-
-## 🎯 Cách hoạt động
-
-1. **Quét mỗi 2 phút:**
-   - Lấy danh sách tất cả USDT Futures từ MEXC
-   - Lấy giá 5 phút gần nhất
-   - Tính % thay đổi
-
-2. **Phát hiện Pump/Dump:**
-   - Tăng >= 5% → Alert 🚀
-   - Giảm >= 5% → Alert 💥
-
-3. **Lọc chất lượng:**
-   - Chỉ báo coin volume >= 100k
-   - Tránh coin ít thanh khoản
-
----
-
-## 📁 Files trong project
-
-```
-├── mexc_futures_bot.py    # Code chính
-├── requirements.txt        # Dependencies
-├── runtime.txt            # Python version
-├── Procfile              # Deploy command
-├── .gitignore            # Git exclude
-└── README.md             # Docs này
+```bash
+docker-compose up -d
 ```
 
----
+## 📊 Deploy trên Railway
 
-## 🔍 Troubleshooting
-
-**NetworkError: Không kết nối Telegram**
-- ✅ Dùng VPN hoặc deploy lên cloud
-
-**Bot không gửi alert**
-- ✅ Đã `/subscribe`?
-- ✅ Ngưỡng có quá cao?
-- ✅ Check logs
-
-**Token invalid**
-- ✅ Lấy token mới từ @BotFather
-
----
-
-## 📈 Nâng cao
-
-- Monitor nhiều exchanges (Binance, Bybit)
-- Thêm RSI, MACD, Bollinger Bands
-- Lưu database lịch sử pump/dump
-- Backtest strategies
-
----
-
-## ⚠️ Disclaimer
-
-- Bot CHỈ cung cấp thông tin, KHÔNG phải lời khuyên đầu tư
-- Crypto có rủi ro cao
-- Tự chịu trách nhiệm với quyết định của mình
-- Bot có thể có bug hoặc miss signals
-
----
-
-## 📜 License
-
-MIT License - Free to use at your own risk
-
----
+1. Fork repository này
+2. Tạo project mới trên Railway
+3. Connect với GitHub repository
+4. Thêm environment variables:
+   - `BOT_TOKEN`
+   - `CHANNEL_ID`
+   - `ADMIN_IDS`
+5. Deploy!
 
 ## 🤝 Contributing
 
-PRs welcome!
+Pull requests are welcome! For major changes, please open an issue first.
 
-1. Fork repo
-2. Create branch (`git checkout -b feature/AmazingFeature`)
-3. Commit (`git commit -m 'Add AmazingFeature'`)
-4. Push (`git push origin feature/AmazingFeature`)
-5. Open Pull Request
+## 📝 License
 
----
+MIT
 
-## ⭐ Star this repo!
+## ⚠️ Disclaimer
 
-Nếu thấy hữu ích, hãy star ⭐ repo này!
-
----
-
-**Made with ❤️ for crypto traders**
-
-🚀 Happy Trading! 🚀
+Bot này chỉ để theo dõi và cảnh báo biến động giá. Không phải lời khuyên đầu tư. Trade có rủi ro!
